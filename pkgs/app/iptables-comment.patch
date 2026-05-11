@@ -1,0 +1,11 @@
+--- a/src/helper/linux/wireguard/wireguardadapter.cpp
++++ b/src/helper/linux/wireguard/wireguardadapter.cpp
+@@ -32,7 +32,7 @@ static bool RunBlockingCommands(const std::vector<std::string> &cmds)
+ WireGuardAdapter::WireGuardAdapter(const std::string &name)
+     : name_(name), is_dns_server_set_(false), has_default_route_(false), fwmark_(0)
+ {
+-    comment_ = WS_PRODUCT_NAME " daemon rule for " + name_ + "\"";
++    comment_ = "\"" WS_PRODUCT_NAME " daemon rule for " + name_ + "\"";
+ }
+ 
+ WireGuardAdapter::~WireGuardAdapter()

@@ -1,0 +1,849 @@
+From 0413363f95514ad9b4cd89ea6832392d449cfee0 Mon Sep 17 00:00:00 2001
+From: Censorship <censorship@windscribe.com>
+Date: Mon, 13 Apr 2026 18:11:14 +0100
+Subject: [PATCH] Anti-censorship: udp-stuffing, tcp-split-reset Amnezia I1-5
+
+---
+ CMakeLists.txt                |   2 +
+ src/openvpn/Makefile.am       |   1 +
+ src/openvpn/anti_censorship.c | 350 ++++++++++++++++++++++++++++++++++
+ src/openvpn/anti_censorship.h | 159 +++++++++++++++
+ src/openvpn/init.c            |   5 +
+ src/openvpn/options.c         |  31 ++-
+ src/openvpn/options.h         |   7 +-
+ src/openvpn/socket.c          |  22 ++-
+ src/openvpn/socket.h          |  27 +++
+ src/openvpn/ssl.c             |  37 ++--
+ src/openvpn/ssl_common.h      |   3 +
+ 11 files changed, 625 insertions(+), 19 deletions(-)
+ create mode 100644 src/openvpn/anti_censorship.c
+ create mode 100644 src/openvpn/anti_censorship.h
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index e25ecae8..a4aa72b5 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -409,6 +409,8 @@ set(SOURCE_FILES
+     src/compat/compat-dirname.c
+     src/compat/compat-gettimeofday.c
+     src/compat/compat-strsep.c
++    src/openvpn/anti_censorship.c
++    src/openvpn/anti_censorship.h
+     src/openvpn/argv.c
+     src/openvpn/argv.h
+     src/openvpn/base64.c
+diff --git a/src/openvpn/Makefile.am b/src/openvpn/Makefile.am
+index 3c567aa7..13ff4b5d 100644
+--- a/src/openvpn/Makefile.am
++++ b/src/openvpn/Makefile.am
+@@ -42,6 +42,7 @@ endif
+ sbin_PROGRAMS = openvpn
+ 
+ openvpn_SOURCES = \
++	anti_censorship.c anti_censorship.h \
+ 	argv.c argv.h \
+ 	auth_token.c auth_token.h \
+ 	base64.c base64.h \
+diff --git a/src/openvpn/anti_censorship.c b/src/openvpn/anti_censorship.c
+new file mode 100644
+index 00000000..0a7b388c
+--- /dev/null
++++ b/src/openvpn/anti_censorship.c
+@@ -0,0 +1,350 @@
++/*
++ *  Anti-censorship stuff for OpenVPN
++ */
++
++#ifdef HAVE_CONFIG_H
++#include "config.h"
++#endif
++
++#include "syshead.h"
++#include "anti_censorship.h"
++#include "socket.h"
++#include "buffer.h"
++#include "crypto.h"
++#include "ssl_common.h"
++#include "reliable.h"
++
++#include <time.h>
++#include <ctype.h>
++
++#ifdef _WIN32
++#include <windows.h>
++#else
++#include <unistd.h>
++#endif
++
++bool socket_set_tcp_nodelay(socket_descriptor_t sd, int state);
++
++bool
++ac_udp_stuffing(struct link_socket *sock, struct link_socket_actual *to)
++{
++    uint16_t stuffing_len, stuffing_num;
++
++    rand_bytes((uint8_t *)&stuffing_len, sizeof(stuffing_len));
++    rand_bytes((uint8_t *)&stuffing_num, sizeof(stuffing_num));
++    stuffing_num = (stuffing_num % (STUFFING_NUM_MAX - 10)) + 10;
++
++    uint8_t stuffing_data[STUFFING_LEN_MAX] = {0};
++
++    for (int i = 0; i < stuffing_num; i++)
++    {
++        stuffing_len = (stuffing_len % (STUFFING_LEN_MAX - 200)) + 200;
++        rand_bytes(stuffing_data, sizeof(stuffing_data));
++        struct buffer stuffing_buf = alloc_buf(STUFFING_LEN_MAX);
++        buf_write(&stuffing_buf, stuffing_data, stuffing_len);
++
++#ifdef _WIN32
++        /* On Windows, retry a few times if send fails */
++        for (int k = 0; k < 5; k++)
++        {
++            int ret = link_socket_write_win32(sock, &stuffing_buf, to);
++            if (ret != -1)
++            {
++                break;
++            }
++            Sleep(5);
++        }
++#else
++        link_socket_write_udp_posix(sock, &stuffing_buf, to);
++#endif
++        free_buf(&stuffing_buf);
++    }
++
++    return true;
++}
++
++int
++ac_tcp_split_reset_write(struct link_socket *sock, struct buffer *buf,
++                          struct link_socket_actual *to)
++{
++    int size = 0;
++    uint8_t split_piece_len, split_piece_len_cur;
++    int left;
++
++    rand_bytes((uint8_t *)&split_piece_len, sizeof(split_piece_len));
++    split_piece_len = (split_piece_len % 8) + 2;
++    left = buf->len;
++
++    socket_set_tcp_nodelay(sock->sd, 1);
++
++    while (left)
++    {
++        split_piece_len_cur = (uint8_t)((split_piece_len > left) ? left : split_piece_len);
++        buf->len = split_piece_len_cur;
++
++#ifdef _WIN32
++        size += link_socket_write_win32(sock, buf, to);
++#else
++        size += (int)link_socket_write_tcp_posix(sock, buf);
++#endif
++
++        buf->len = left;
++        left -= split_piece_len_cur;
++        buf_advance(buf, split_piece_len_cur);
++
++#ifdef _WIN32
++        Sleep(5);
++#else
++        usleep(5000);
++#endif
++    }
++
++    if (!(sock->sockflags & SF_TCP_NODELAY))
++    {
++        socket_set_tcp_nodelay(sock->sd, 0);
++    }
++
++    return size;
++}
++
++int
++ac_send_multiple_resets(const struct tls_session *session,
++                         struct key_state *ks,
++                         struct reliable *send_reliable,
++                         bool skip_initial_send)
++{
++    uint8_t count = 1;
++
++    if (session->opt->tcp_split_reset)
++    {
++        rand_bytes(&count, sizeof(count));
++        count = 2 + (count % 2);
++    }
++
++    return count;
++}
++
++/* ---------------------------------------------------------------------------
++ * AmneziaWG I1..I5 parser
++ * -------------------------------------------------------------------------*/
++
++/*
++ * Parse a hex string (with optional "0x" prefix) and append the decoded bytes
++ * to buf. Returns true on success.
++ */
++static bool
++parse_hex_tag(const char *hex, size_t hexlen, struct buffer *out)
++{
++	uint8_t byte = 0;
++
++    /* skip optional "0x" / "0X" prefix */
++    if (hexlen >= 2 && hex[0] == '0' && (hex[1] == 'x' || hex[1] == 'X'))
++    {
++        hex    += 2;
++        hexlen -= 2;
++    }
++
++    if (hexlen == 0 || hexlen % 2 != 0)
++        return false;
++
++    for (size_t i = 0; i < hexlen; i += 2)
++    {
++        if (!isxdigit((unsigned char)hex[i]) || !isxdigit((unsigned char)hex[i + 1]))
++            return false;
++
++        byte = (uint8_t)(
++            (isdigit((unsigned char)hex[i])     ? hex[i]     - '0' : tolower((unsigned char)hex[i])     - 'a' + 10) << 4 |
++            (isdigit((unsigned char)hex[i + 1]) ? hex[i + 1] - '0' : tolower((unsigned char)hex[i + 1]) - 'a' + 10)
++        );
++        if (!buf_write(out, &byte, 1))
++            return false;
++    }
++    return true;
++}
++
++bool
++ac_build_pre_connect_packet(const char *spec, struct buffer *out)
++{
++    if (!spec || !out)
++        return false;
++
++    const char *p = spec;
++
++    while (*p)
++    {
++        /* skip whitespace between tags */
++        while (*p == ' ' || *p == '\t')
++            p++;
++
++        if (*p == '\0')
++            break;
++
++        if (*p != '<')
++        {
++            msg(D_PUSH_ERRORS, "ac_build_pre_connect_packet: expected '<', got '%c'", *p);
++            return false;
++        }
++        p++; /* skip '<' */
++
++        /* find closing '>' */
++        const char *close = strchr(p, '>');
++        if (!close)
++        {
++            msg(D_PUSH_ERRORS, "ac_build_pre_connect_packet: unclosed tag");
++            return false;
++        }
++
++        /* copy tag content into a local buffer for parsing */
++        size_t taglen = (size_t)(close - p);
++	    /* assume long hex-encoded b tag */
++        char tag[AC_AMNEZIA_PRE_CONNECT_MAX * 2];
++        if (taglen == 0 || taglen >= sizeof(tag))
++        {
++            msg(D_PUSH_ERRORS, "ac_build_pre_connect_packet: tag too long or empty");
++            return false;
++        }
++        memcpy(tag, p, taglen);
++        tag[taglen] = '\0';
++        p = close + 1; /* advance past '>' */
++
++        /* <t>: 32-bit Unix timestamp, network byte order */
++        if (strcmp(tag, "t") == 0)
++        {
++            uint32_t ts = htonl((uint32_t)time(NULL));
++            if (!buf_write(out, &ts, sizeof(ts)))
++                return false;
++        }
++        /* <b hex_data>: static hex-encoded payload */
++        else if (taglen > 2 && tag[0] == 'b' && tag[1] == ' ')
++        {
++            const char *hexdata = tag + 2;
++            size_t hexlen = strlen(hexdata);
++            if (!parse_hex_tag(hexdata, hexlen, out))
++            {
++                msg(D_PUSH_ERRORS, "ac_build_pre_connect_packet: invalid hex in <b> tag: %s", hexdata);
++                return false;
++            }
++        }
++        /* <r N>: N cryptographically secure random bytes */
++        else if (taglen > 2 && tag[0] == 'r' && tag[1] == ' ')
++        {
++            int n = atoi(tag + 2);
++            if (n <= 0 || n > AC_AMNEZIA_TAG_RAND_MAX)
++            {
++                msg(D_PUSH_ERRORS, "ac_build_pre_connect_packet: <r> length out of range: %d", n);
++                return false;
++            }
++            if (BLEN(out) + n > AC_AMNEZIA_PRE_CONNECT_MAX)
++            {
++                msg(D_PUSH_ERRORS, "ac_build_pre_connect_packet: <r> packet exceeds buffer size");
++                return false;
++            }
++            uint8_t randbuf[AC_AMNEZIA_TAG_RAND_MAX];
++            rand_bytes(randbuf, n);
++            if (!buf_write(out, randbuf, n))
++                return false;
++        }
++        /* <rc N>: N random alphanumeric ASCII chars [A-Za-z0-9] */
++        else if (taglen > 3 && tag[0] == 'r' && tag[1] == 'c' && tag[2] == ' ')
++        {
++            int n = atoi(tag + 3);
++            if (n <= 0 || n > AC_AMNEZIA_TAG_RANDC_MAX)
++            {
++                msg(D_PUSH_ERRORS, "ac_build_pre_connect_packet: <rc> length out of range: %d", n);
++                return false;
++            }
++            if (BLEN(out) + n > AC_AMNEZIA_PRE_CONNECT_MAX)
++            {
++                msg(D_PUSH_ERRORS, "ac_build_pre_connect_packet: <rc> packet exceeds buffer size");
++                return false;
++            }
++            static const char alphanum[] =
++                "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
++            for (int i = 0; i < n; i++)
++            {
++                uint8_t idx;
++                rand_bytes(&idx, sizeof(idx));
++                uint8_t ch = (uint8_t)alphanum[idx % (sizeof(alphanum) - 1)];
++                if (!buf_write(out, &ch, 1))
++                    return false;
++            }
++        }
++        /* <rd N>: N random decimal digit chars [0-9] */
++        else if (taglen > 3 && tag[0] == 'r' && tag[1] == 'd' && tag[2] == ' ')
++        {
++            int n = atoi(tag + 3);
++            if (n <= 0 || n > AC_AMNEZIA_TAG_RANDC_MAX)
++            {
++                msg(D_PUSH_ERRORS, "ac_build_pre_connect_packet: <rd> length out of range: %d", n);
++                return false;
++            }
++            if (BLEN(out) + n > AC_AMNEZIA_PRE_CONNECT_MAX)
++            {
++                msg(D_PUSH_ERRORS, "ac_build_pre_connect_packet: <rd> packet exceeds buffer size");
++                return false;
++            }
++            for (int i = 0; i < n; i++)
++            {
++                uint8_t rnd;
++                rand_bytes(&rnd, sizeof(rnd));
++                uint8_t ch = (uint8_t)('0' + (rnd % 10));
++                if (!buf_write(out, &ch, 1))
++                {
++                    return false;
++                }
++            }
++        }
++        else
++        {
++            msg(D_PUSH_ERRORS, "ac_build_pre_connect_packet: unknown tag: <%s>", tag);
++            return false;
++        }
++    }
++
++    return true;
++}
++
++void
++ac_send_pre_connect_packets(struct link_socket *sock,
++                             struct link_socket_actual *to)
++{
++    if (!sock || !to)
++        return;
++
++    /* Only on UDP sockets */
++    if (sock->info.proto != PROTO_UDP)
++        return;
++
++    for (int i = 0; i < AC_AMNEZIA_PRE_CONNECT_COUNT; i++)
++    {
++        if (!sock->i_packets[i])
++            continue;
++
++        struct buffer pkt = alloc_buf(AC_AMNEZIA_PRE_CONNECT_MAX);
++        if (!ac_build_pre_connect_packet(sock->i_packets[i], &pkt))
++        {
++            msg(D_PUSH_ERRORS, "ac_send_pre_connect_packets: failed to build packet i%d, skipping", i + 1);
++            free_buf(&pkt);
++            continue;
++        }
++
++        if (BLEN(&pkt) == 0)
++        {
++            free_buf(&pkt);
++            continue;
++        }
++
++#ifdef _WIN32
++        for (int k = 0; k < 30; k++)
++        {
++            int ret = link_socket_write_win32(sock, &pkt, to);
++            if (ret != -1)
++                break;
++            Sleep(10);
++        }
++#else
++        link_socket_write_udp_posix(sock, &pkt, to);
++#endif
++        free_buf(&pkt);
++    }
++}
+diff --git a/src/openvpn/anti_censorship.h b/src/openvpn/anti_censorship.h
+new file mode 100644
+index 00000000..62008af7
+--- /dev/null
++++ b/src/openvpn/anti_censorship.h
+@@ -0,0 +1,159 @@
++/*
++ *  Anti-censorship stuff for OpenVPN
++ */
++
++/**
++ * @file anti_censorship.h
++ * @brief Anti-censorship features for OpenVPN
++ *
++ * This module implements anti-censorship techniques including:
++ * - TCP split reset: splits RESET packets into multiple pieces
++ * - UDP stuffing: sends random data packets before RESET packets
++ * - Pre-connect packets (I1-I5): sends user-defined packets before the
++ *   OpenVPN RESET packet (UDP only)
++ */
++
++#ifndef ANTI_CENSORSHIP_H
++#define ANTI_CENSORSHIP_H
++
++#include "buffer.h"
++
++/* Forward declarations */
++struct link_socket;
++struct link_socket_actual;
++struct tls_session;
++struct key_state;
++struct reliable;
++
++/*
++ * Socket flags for anti-censorship features
++ */
++#define SF_TCP_SPLITRESET (1<<8)
++#define SF_UDP_STUFFING (1<<9)
++
++/*
++ * OpenVPN packet opcodes (needed for anti-censorship logic)
++ */
++#ifndef P_CONTROL_HARD_RESET_CLIENT_V2
++#define P_CONTROL_HARD_RESET_CLIENT_V2 7
++#endif
++#ifndef P_CONTROL_HARD_RESET_CLIENT_V3
++#define P_CONTROL_HARD_RESET_CLIENT_V3 10
++#endif
++#ifndef P_CONTROL_HARD_RESET_SERVER_V2
++#define P_CONTROL_HARD_RESET_SERVER_V2 8
++#endif
++#ifndef P_OPCODE_SHIFT
++#define P_OPCODE_SHIFT 3
++#endif
++#ifndef P_ACK_V1
++#define P_ACK_V1 5
++#endif
++
++/*
++ * UDP stuffing parameters
++ */
++#define STUFFING_LEN_MAX 900
++#define STUFFING_NUM_MAX 100
++
++/*
++ * AmneziaWG I1-I5 parameters
++ */
++#define AC_AMNEZIA_PRE_CONNECT_COUNT  5       /* number of I1..I5 slots */
++#define AC_AMNEZIA_PRE_CONNECT_MAX    1400    /* max assembled packet size in bytes */
++#define AC_AMNEZIA_TAG_RAND_MAX               1400    /* max bytes for <r N> */
++#define AC_AMNEZIA_TAG_RANDC_MAX              1400    /* max chars for <rc N> and <rd N> */
++
++/**
++ * Perform UDP stuffing: send random packets before the actual packet
++ * @param sock Link socket to use for sending
++ * @param to Destination address
++ * @return true on success
++ */
++bool ac_udp_stuffing(struct link_socket *sock, struct link_socket_actual *to);
++
++/**
++ * Build a pre-connect packet buffer from a tag-spec string.
++ *
++ * Tag syntax:
++ *   <b hex_data>   static bytes (hex, even length, optional 0x prefix)
++ *   <t>            32-bit Unix timestamp, network byte order
++ *   <r N>          N cryptographically secure random bytes (N <= 1000)
++ *   <rc N>         N random ASCII alphanumeric chars [A-Za-z0-9] (N <= 1000)
++ *   <rd N>         N random decimal digit chars [0-9] (N <= 1000)
++ *
++ * @param spec  NUL-terminated tag-spec string (the I1..I5 option value)
++ * @param out   Output buffer; caller must provide at least AC_AMNEZIA_PRE_CONNECT_MAX bytes
++ * @return true on success, false on parse error or overflow
++ */
++bool ac_build_pre_connect_packet(const char *spec, struct buffer *out);
++
++/**
++ * Send all non-NULL pre-connect packets (I1..I5) towards the remote.
++ *
++ * @param sock Link socket (UDP only; TCP sockets are silently ignored)
++ * @param to   Destination address
++ */
++void ac_send_pre_connect_packets(struct link_socket *sock,
++                                  struct link_socket_actual *to);
++
++/**
++ * Write TCP packet with split RESET (if applicable)
++ * @param sock Link socket to use
++ * @param buf Buffer to send
++ * @param to Destination address
++ * @return Number of bytes written, or -1 on error
++ */
++int ac_tcp_split_reset_write(struct link_socket *sock, struct buffer *buf,
++                              struct link_socket_actual *to);
++
++/**
++ * Send multiple RESET packets for TCP split reset feature
++ * @param session TLS session
++ * @param ks Key state
++ * @param send_reliable Reliable send buffer
++ * @param skip_initial_send Whether to skip sending initial packet
++ * @return Number of packets generated
++ */
++int ac_send_multiple_resets(const struct tls_session *session,
++                             struct key_state *ks,
++                             struct reliable *send_reliable,
++                             bool skip_initial_send);
++
++/*
++ * Macro to inject anti-censorship UDP write logic into link_socket_write_udp.
++ * This should be placed at the beginning of the function.
++ *
++ * Order of operations on a RESET packet:
++ *   1. ac_send_pre_connect_packets() - send I1..I5 user-defined packets
++ *   2. ac_udp_stuffing()             - send random stuffing packets (if enabled)
++ *   3. the actual RESET packet       - sent by the caller as normal
++ */
++#define AC_UDP_WRITE_INJECT(sock, buf, to) \
++    do { \
++        uint8_t _ac_opcode = *BPTR(buf) >> P_OPCODE_SHIFT; \
++        if (_ac_opcode == P_CONTROL_HARD_RESET_CLIENT_V2 \
++            || _ac_opcode == P_CONTROL_HARD_RESET_CLIENT_V3 \
++            || _ac_opcode == P_CONTROL_HARD_RESET_SERVER_V2) { \
++            ac_send_pre_connect_packets((sock), (to)); \
++            if ((sock)->sockflags & SF_UDP_STUFFING) { \
++                ac_udp_stuffing((sock), (to)); \
++            } \
++        } \
++    } while(0)
++
++/*
++ * Macro to inject anti-censorship option initialization in ssl_common.h
++ */
++#define AC_TLS_OPTIONS_FIELD bool tcp_split_reset;
++
++/*
++ * Macro to inject anti-censorship initialization in init.c
++ */
++#define AC_INIT_TLS_OPTIONS(to, options) \
++    do { \
++        (to).tcp_split_reset = !!((options)->sockflags & SF_TCP_SPLITRESET \
++                                  && (options)->ce.proto != PROTO_UDP); \
++    } while(0)
++
++#endif /* ANTI_CENSORSHIP_H */
+diff --git a/src/openvpn/init.c b/src/openvpn/init.c
+index 1246cfb3..ce5b83d7 100644
+--- a/src/openvpn/init.c
++++ b/src/openvpn/init.c
+@@ -49,6 +49,7 @@
+ #include "tls_crypt.h"
+ #include "forward.h"
+ #include "auth_token.h"
++#include "anti_censorship.h"
+ #include "mss.h"
+ #include "mudp.h"
+ #include "dco.h"
+@@ -3456,6 +3457,10 @@ do_init_crypto_tls(struct context *c, const unsigned int flags)
+     /* let the TLS engine know if keys have to be installed in DCO or not */
+     to.dco_enabled = dco_enabled(options);
+ 
++    /* Anti-censorship: initialize tcp_split_reset option */
++    to.tcp_split_reset = !!(options->sockflags & SF_TCP_SPLITRESET
++                            && options->ce.proto != PROTO_UDP);
++
+     /*
+      * Initialize OpenVPN's master TLS-mode object.
+      */
+diff --git a/src/openvpn/options.c b/src/openvpn/options.c
+index b3a126da..1eb59d26 100644
+--- a/src/openvpn/options.c
++++ b/src/openvpn/options.c
+@@ -3060,6 +3060,13 @@ options_postprocess_mutate_ce(struct options *o, struct connection_entry *ce)
+         msg(M_WARN, "NOTICE: --explicit-exit-notify ignored for --proto tcp");
+         ce->explicit_exit_notification = 0;
+     }
++
++    /* I1-I5 for TCP could not be used */
++    for (int i = 0; i < AC_AMNEZIA_PRE_CONNECT_COUNT; i++)
++    {
++        if (o->i_packets[i] && ce->proto != PROTO_UDP)
++            msg(M_WARN, "NOTICE: --I1-I5 are suitable only for proto UDP");
++    }
+ }
+ 
+ static void
+@@ -7704,6 +7711,27 @@ add_option(struct options *options, char *p[], bool is_inline, const char *file,
+         VERIFY_PERMISSION(OPT_P_GENERAL);
+         options->server_flags |= SF_TCP_NODELAY_HELPER;
+     }
++    else if (streq(p[0], "udp-stuffing") && !p[1])
++    {
++        VERIFY_PERMISSION(OPT_P_GENERAL);
++        if (options->ce.proto == PROTO_UDP) {
++            options->sockflags |= SF_UDP_STUFFING;
++        }
++    }
++    else if (streq(p[0], "tcp-split-reset"))
++    {
++        VERIFY_PERMISSION(OPT_P_GENERAL);
++        options->sockflags |= SF_TCP_SPLITRESET;
++    }
++    else if ((streq(p[0], "i1") || streq(p[0], "i2") || streq(p[0], "i3")
++              || streq(p[0], "i4") || streq(p[0], "i5")
++              || streq(p[0], "I1") || streq(p[0], "I2") || streq(p[0], "I3")
++              || streq(p[0], "I4") || streq(p[0], "I5")) && p[1] && !p[2])
++    {
++        VERIFY_PERMISSION(OPT_P_GENERAL);
++        int idx = p[0][1] - '1'; /* '1'..'5' -> 0..4 */
++        options->i_packets[idx] = p[1];
++    }
+     else if (streq(p[0], "stale-routes-check") && p[1] && !p[3])
+     {
+         int ageing_time, check_interval;
+@@ -9311,6 +9339,7 @@ add_option(struct options *options, char *p[], bool is_inline, const char *file,
+                 p[0], PACKAGE_VERSION);
+         }
+     }
++
+ err:
+     gc_free(&gc);
+ }
+diff --git a/src/openvpn/options.h b/src/openvpn/options.h
+index 05256d61..a60041b7 100644
+--- a/src/openvpn/options.h
++++ b/src/openvpn/options.h
+@@ -53,8 +53,8 @@
+ /*
+  * Max size of options line and parameter.
+  */
+-#define OPTION_PARM_SIZE 256
+-#define OPTION_LINE_SIZE 256
++#define OPTION_PARM_SIZE 4096
++#define OPTION_LINE_SIZE 4096
+ 
+ extern const char title_string[];
+ 
+@@ -418,6 +418,9 @@ struct options
+     /* socket flags */
+     unsigned int sockflags;
+ 
++    /* Pre-connect UDP packets (i1..i5): sent before the OpenVPN RESET packet */
++    const char *i_packets[5];
++
+     /* route management */
+     const char *route_script;
+     const char *route_predown_script;
+diff --git a/src/openvpn/socket.c b/src/openvpn/socket.c
+index 44121d7b..c42a83a7 100644
+--- a/src/openvpn/socket.c
++++ b/src/openvpn/socket.c
+@@ -485,7 +485,7 @@ socket_set_buffers(socket_descriptor_t fd, const struct socket_buffer_size *sbs,
+  * Set other socket options
+  */
+ 
+-static bool
++bool
+ socket_set_tcp_nodelay(socket_descriptor_t sd, int state)
+ {
+ #if defined(_WIN32) || (defined(IPPROTO_TCP) && defined(TCP_NODELAY))
+@@ -1408,6 +1408,12 @@ link_socket_init_phase1(struct context *c, int sock_index, int mode)
+     }
+ #endif
+ 
++    /* Pre-connect UDP packets (i1..i5) */
++    for (int i = 0; i < AC_AMNEZIA_PRE_CONNECT_COUNT; i++)
++    {
++        sock->i_packets[i] = o->i_packets[i];
++    }
++
+     sock->mark = o->mark;
+     sock->bind_dev = o->bind_dev;
+     sock->info.proto = proto;
+@@ -2449,7 +2455,21 @@ link_socket_write_tcp(struct link_socket *sock, struct buffer *buf, struct link_
+     dmsg(D_STREAM_DEBUG, "STREAM: WRITE %d offset=%d", (int)len, buf->offset);
+     ASSERT(len <= sock->stream_buf.maxlen);
+     len = htonps(len);
++
++    uint8_t opcode = *BPTR(buf) >> P_OPCODE_SHIFT;
++
+     ASSERT(buf_write_prepend(buf, &len, sizeof(len)));
++
++    /* Anti-censorship: TCP split reset */
++    if (sock->sockflags & SF_TCP_SPLITRESET)
++    {
++        if (opcode == P_CONTROL_HARD_RESET_CLIENT_V2
++            || opcode == P_CONTROL_HARD_RESET_CLIENT_V3)
++        {
++            return ac_tcp_split_reset_write(sock, buf, to);
++        }
++    }
++
+ #ifdef _WIN32
+     return link_socket_write_win32(sock, buf, to);
+ #else
+diff --git a/src/openvpn/socket.h b/src/openvpn/socket.h
+index ebaf776f..64091d4c 100644
+--- a/src/openvpn/socket.h
++++ b/src/openvpn/socket.h
+@@ -35,6 +35,7 @@
+ #include "misc.h"
+ #include "tun.h"
+ #include "socket_util.h"
++#include "anti_censorship.h"
+ 
+ /*
+  * OpenVPN's default port number as assigned by IANA.
+@@ -214,7 +215,12 @@ struct link_socket
+ #define SF_DCO_WIN           (1 << 5)
+ #define SF_PREPEND_SA        (1 << 6)
+ #define SF_PKTINFO_COPY_IIF  (1 << 7)
++/* SF_TCP_SPLITRESET and SF_UDP_STUFFING defined in anti_censorship.h */
++
+     unsigned int sockflags;
++
++    /* Pre-connect UDP packets (i1..i5) */
++    const char *i_packets[AC_AMNEZIA_PRE_CONNECT_COUNT];
+     int mark;
+     const char *bind_dev;
+ 
+@@ -723,7 +729,28 @@ link_socket_write_tcp_posix(struct link_socket *sock, struct buffer *buf)
+ static inline ssize_t
+ link_socket_write_udp(struct link_socket *sock, struct buffer *buf, struct link_socket_actual *to)
+ {
++    /* Anti-censorship: UDP stuffing */
++    uint8_t ocpode = *BPTR(buf) >> P_OPCODE_SHIFT;
++    if (ocpode == P_CONTROL_HARD_RESET_CLIENT_V2
++        || ocpode == P_CONTROL_HARD_RESET_CLIENT_V3
++        || ocpode == P_CONTROL_HARD_RESET_SERVER_V2)
++    {
++        ac_send_pre_connect_packets(sock, to);
++        if ((sock)->sockflags & SF_UDP_STUFFING)
++            ac_udp_stuffing(sock, to);
++    }
++
+ #ifdef _WIN32
++    /* Windows: retry on error */
++    for (int k = 0; k < 30; k++)
++    {
++        int ret = link_socket_write_win32(sock, buf, to);
++        if (ret != -1)
++        {
++            return ret;
++        }
++        Sleep(10);
++    }
+     return link_socket_write_win32(sock, buf, to);
+ #else
+     return link_socket_write_udp_posix(sock, buf, to);
+diff --git a/src/openvpn/ssl.c b/src/openvpn/ssl.c
+index 962f5df4..5d6fe183 100644
+--- a/src/openvpn/ssl.c
++++ b/src/openvpn/ssl.c
+@@ -62,6 +62,7 @@
+ #include "auth_token.h"
+ #include "mss.h"
+ #include "dco.h"
++#include "anti_censorship.h"
+ 
+ #include "memdbg.h"
+ #include "openvpn.h"
+@@ -2408,26 +2409,32 @@ static bool
+ session_move_pre_start(const struct tls_session *session, struct key_state *ks,
+                        bool skip_initial_send)
+ {
+-    struct buffer *buf = reliable_get_buf_output_sequenced(ks->send_reliable);
+-    if (!buf)
++    /* Anti-censorship: send multiple reset packets for TCP */
++    uint8_t count = (uint8_t)ac_send_multiple_resets(session, ks, ks->send_reliable, skip_initial_send);
++    
++    for (uint8_t i = 0; i < count; i++)
+     {
+-        return false;
+-    }
++        struct buffer *buf = reliable_get_buf_output_sequenced(ks->send_reliable);
++        if (!buf)
++        {
++            return false;
++        }
+ 
+-    ks->initial = now;
+-    ks->must_negotiate = now + session->opt->handshake_window;
+-    ks->auth_deferred_expire = now + auth_deferred_expire_window(session->opt);
++        ks->initial = now;
++        ks->must_negotiate = now + session->opt->handshake_window;
++        ks->auth_deferred_expire = now + auth_deferred_expire_window(session->opt);
+ 
+-    /* null buffer */
+-    reliable_mark_active_outgoing(ks->send_reliable, buf, ks->initial_opcode);
++        /* null buffer */
++        reliable_mark_active_outgoing(ks->send_reliable, buf, ks->initial_opcode);
+ 
+-    /* If we want to skip sending the initial handshake packet we still generate
+-     * it to increase internal counters etc. but immediately mark it as done */
+-    if (skip_initial_send)
+-    {
+-        reliable_mark_deleted(ks->send_reliable, buf);
++        /* If we want to skip sending the initial handshake packet we still generate
++         * it to increase internal counters etc. but immediately mark it as done */
++        if (skip_initial_send)
++        {
++            reliable_mark_deleted(ks->send_reliable, buf);
++        }
++        INCR_GENERATED;
+     }
+-    INCR_GENERATED;
+ 
+     ks->state = skip_initial_send ? S_PRE_START_SKIP : S_PRE_START;
+ 
+diff --git a/src/openvpn/ssl_common.h b/src/openvpn/ssl_common.h
+index 6f310a56..8be1bc0f 100644
+--- a/src/openvpn/ssl_common.h
++++ b/src/openvpn/ssl_common.h
+@@ -453,6 +453,9 @@ struct tls_options
+     size_t ekm_size;
+ 
+     bool dco_enabled; /**< Whether keys have to be installed in DCO or not */
++
++    /* Anti-censorship: TCP split reset option */
++    bool tcp_split_reset;
+ };
+ 
+ /** @addtogroup control_processor
+-- 
+2.53.0
+
+

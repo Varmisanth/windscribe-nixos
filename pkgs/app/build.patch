@@ -1,0 +1,100 @@
+--- a/cmake/integrations/windscribe.cmake
++++ b/cmake/integrations/windscribe.cmake
+@@ -107,3 +107,4 @@
+     lib/libcrypto.so.3
+     lib/libwsnet.so
+ )
++set(WS_BUNDLED_HELPER_NAMES)
+--- a/src/client/CMakeLists.txt
++++ b/src/client/CMakeLists.txt
+@@ -257,8 +257,6 @@
+         LIBRARY DESTINATION "${WS_PRODUCT_NAME}.app/Contents/Frameworks"
+         BUNDLE DESTINATION .
+     )
+-    install(FILES ${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/lib/libcrypto.3.dylib DESTINATION "${WS_PRODUCT_NAME}.app/Contents/Frameworks")
+-    install(FILES ${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/lib/libssl.3.dylib DESTINATION "${WS_PRODUCT_NAME}.app/Contents/Frameworks")
+ else()
+     install(TARGETS ${WS_APP_TARGET}
+         RUNTIME DESTINATION .
+@@ -282,6 +280,4 @@
+ 
+ if(UNIX AND (NOT APPLE))
+     install(IMPORTED_RUNTIME_ARTIFACTS wsnet DESTINATION lib)
+-    install(FILES ${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/lib/libcrypto.so.3 DESTINATION lib)
+-    install(FILES ${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/lib/libssl.so.3 DESTINATION lib)
+ endif()
+--- a/src/windscribe-cli/CMakeLists.txt
++++ b/src/windscribe-cli/CMakeLists.txt
+@@ -156,3 +156,4 @@
+ install(TARGETS ${WS_CLI_TARGET}
+     RUNTIME DESTINATION .
+ )
++target_compile_definitions(${WS_CLI_TARGET} PRIVATE CLI_ONLY)
+--- a/src/client/frontend/gui/main.cpp
++++ b/src/client/frontend/gui/main.cpp
+@@ -66,20 +66,7 @@
+ 
+ int main(int argc, char *argv[])
+ {
+-#if defined (Q_OS_LINUX)
+-#ifndef QT_DEBUG
+-    gid_t gid = LinuxUtils::getAppGid();
+-    if (gid == -1) {
+-        qCCritical(LOG_BASIC) << "windscribe group does not exist";
+-        return -1;
+-    }
+-    qCDebug(LOG_BASIC) << "Setting gid to:" << gid;
+-    if (setgid(gid) < 0) {
+-        qCCritical(LOG_BASIC) << "Could not set windscribe group";
+-        return -1;
+-    }
+-#endif
+-#elif defined(Q_OS_WIN)
++#if defined(Q_OS_WIN)
+ #ifndef _DEBUG
+     /*
+     // Disabled for now since the mitigation is blocking 'legitimate' DLL injection (e.g. FileZilla Pro's shell extension DLL).
+@@ -110,7 +97,8 @@
+ #elif defined (Q_OS_MACOS)
+         QStringList pluginsPath;
+         pluginsPath << MacUtils::getBundlePath() + "/Contents/PlugIns";
+-        QCoreApplication::setLibraryPaths(pluginsPath);
++        for (const QString &p : pluginsPath)
++            QCoreApplication::addLibraryPath(p);
+ #elif defined (Q_OS_LINUX)
+         //todo move to LinuxUtils
+         char result[PATH_MAX] = {};
+@@ -121,7 +109,8 @@
+         }
+         QStringList pluginsPath;
+         pluginsPath << QString::fromStdString(path) + "/plugins";
+-        QCoreApplication::setLibraryPaths(pluginsPath);
++        for (const QString &p : pluginsPath)
++            QCoreApplication::addLibraryPath(p);
+     #endif
+ #endif
+ 
+--- a/src/client/client-common/utils/log/logger.cpp
++++ b/src/client/client-common/utils/log/logger.cpp
+@@ -94,7 +94,7 @@
+         auto sinkDebug = std::make_shared<spdlog::sinks::msvc_sink_mt>(false);
+         spdlog::default_logger()->sinks().push_back(sinkDebug);
+         spdlog::get("raw")->sinks().push_back(sinkDebug);
+-#elif not defined(CLI_ONLY)
++#elif defined(WS_DEV_LOGS) && not defined(CLI_ONLY)
+         auto sinkDebug = std::make_shared<spdlog::sinks::stdout_sink_mt>();
+         sinkDebug->set_level(spdlog::level::trace); // Required to get any output in the terminal on Linux.
+         spdlog::default_logger()->sinks().push_back(sinkDebug);
+--- a/src/client/frontend/gui/CMakeLists.txt
++++ b/src/client/frontend/gui/CMakeLists.txt
+@@ -40,7 +40,7 @@
+ 
+ # Using the -extensions flag to skip processing the .ui files in the test projects.  Otherwise, the
+ # strings in said ui files will be added to the .ts output files.
+-if (UPDATE_TRANSLATIONS AND NOT DEFINE_QT_CREATOR_DEV_BUILD_MACRO)
+-    qt6_create_translation(WS_QM_FILES ${CMAKE_CURRENT_SOURCE_DIR}/../.. ${WS_TS_FILES} OPTIONS -extensions cpp,h -locations none)
++if (TRUE)
++    qt6_add_translation(WS_QM_FILES ${WS_TS_FILES})
+ endif()
+ 
+ set(PROJECT_SOURCES

@@ -1,0 +1,12 @@
+set(CURL_FOUND TRUE)
+set(CURL_VERSION 8.19.0)
+set(CURL_VERSION_STRING "8.19.0")
+set(CURL_INCLUDE_DIRS "@dev@/include")
+set(CURL_LIBRARIES "@out@/lib/libcurl.so")
+if(NOT TARGET CURL::libcurl)
+  add_library(CURL::libcurl SHARED IMPORTED)
+  set_target_properties(CURL::libcurl PROPERTIES
+    IMPORTED_LOCATION "@out@/lib/libcurl.so"
+    INTERFACE_INCLUDE_DIRECTORIES "@dev@/include"
+  )
+endif()
