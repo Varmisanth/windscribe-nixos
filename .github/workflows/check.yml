@@ -14,4 +14,6 @@ jobs:
         with:
           extra_nix_config: |
             experimental-features = nix-command flakes
-      - run: nix flake check --no-build --show-trace
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - run: nix flake check --show-trace
+      - run: nix build .#windscribe -L
