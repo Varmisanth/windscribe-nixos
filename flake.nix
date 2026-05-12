@@ -36,7 +36,7 @@
       });
       nixosModules.windscribe = ./os.nix;
       homeManagerModules.windscribe = ./hm.nix;
-      overlays.default = final: _prev: {
+      overlays.windscribe = final: _prev: {
         windscribe = import ./package.nix { pkgs = final; };
       };
     };

@@ -32,7 +32,7 @@
       modules = [
         windscribe-nixos.nixosModules.windscribe
         ({ pkgs, ... }: {
-          nixpkgs.overlays = [ windscribe-nixos.overlays.default ];
+          nixpkgs.overlays = [ windscribe-nixos.overlays.windscribe ];
           environment.systemPackages = [ pkgs.windscribe ];
           services.windscribe = {
             enable = true;       # default: false
