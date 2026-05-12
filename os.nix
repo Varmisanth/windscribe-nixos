@@ -29,6 +29,17 @@ in
         source = "${windscribe}/share/polkit-1/actions/com.windscribe.authhelper.policy";
       };
     };
+    systemd.user.units."windscribe.service" = {
+      text = ''
+        [Unit]
+        Description=Windscribe service
+        [Service]
+        Type=simple
+        ExecStart=${windscribe}/opt/windscribe/Windscribe
+        [Install]
+        WantedBy=default.target
+      '';
+    };
     networking.networkmanager.enable = lib.mkDefault true;
     services.resolved.enable = lib.mkDefault true;
     systemd.services.windscribe-helper = {
