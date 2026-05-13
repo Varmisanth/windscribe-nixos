@@ -19,6 +19,9 @@
     <img alt="license" src="https://img.shields.io/badge/license-GPL--2.0-blue.svg">
   </a>
   <img alt="updated" src="https://img.shields.io/github/last-commit/Varmisanth/windscribe-nixos?label=updated">
+  <a href="https://varmisanth.cachix.org">
+    <img alt="cachix" src="https://img.shields.io/badge/cachix-varmisanth-blue.svg">
+  </a>
 </p>
 
 ## Quickstart via Flakes on NixOS
@@ -183,6 +186,21 @@ in {
 | `programs.windscribe.enable` | bool | `false` |
 | `services.windscribe.users` | list of str | `[ ]` |
 | `services.windscribe.autoStart` | bool | `true` |
+
+## Binary cache
+
+To skip building from source, the flake fetches pre-built artifacts from [`varmisanth.cachix.org`](https://app.cachix.org/cache/varmisanth).
+
+Nix prompts to accept the substituter on the first build.
+
+For legacy channels or non-interactive setups add it manually:
+
+```nix
+nix.settings = {
+  substituters = [ "https://varmisanth.cachix.org" ];
+  trusted-public-keys = [ "varmisanth.cachix.org-1:rt04yjDDJKDWe+h6B1XQWfdsSDUX6uks+9IKVBjn2d8=" ];
+};
+```
 
 ## License
 

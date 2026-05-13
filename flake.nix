@@ -1,5 +1,11 @@
 {
   description = "Windscribe VPN client packaged for NixOS";
+  nixConfig = {
+    extra-substituters = [ "https://varmisanth.cachix.org" ];
+    extra-trusted-public-keys = [
+      "varmisanth.cachix.org-1:rt04yjDDJKDWe+h6B1XQWfdsSDUX6uks+9IKVBjn2d8="
+    ];
+  };
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     treefmt-nix.url = "github:numtide/treefmt-nix";
