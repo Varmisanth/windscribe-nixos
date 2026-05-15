@@ -205,3 +205,7 @@ nix.settings = {
 ## License
 
 [GPL-2.0-only](LICENSE), inherited from [Windscribe Desktop-App](https://github.com/Windscribe/Desktop-App).
+
+## Acknowledgments
+
+Packaged with help from [Claude Code](https://claude.com/claude-code).
