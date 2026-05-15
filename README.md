@@ -8,7 +8,7 @@
   windscribe-nixos
 </h1>
 
-<p align="center"><em>Windscribe VPN client packaged for NixOS by <a href="https://github.com/Varmisanth">@Varmisanth</a></em></p>
+<p align="center"><em>Windscribe VPN client packaged for NixOS</em></p>
 
 <p align="center">
   <img alt="upstream" src="https://img.shields.io/github/v/release/Windscribe/Desktop-App?label=upstream&color=blueviolet">
