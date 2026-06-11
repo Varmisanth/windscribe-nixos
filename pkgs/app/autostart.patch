@@ -1,0 +1,38 @@
+diff --git a/src/client/frontend/gui/preferenceswindow/generalwindow/generalwindowitem.cpp b/src/client/frontend/gui/preferenceswindow/generalwindow/generalwindowitem.cpp
+index 63705e4..2090098 100644
+--- a/src/client/frontend/gui/preferenceswindow/generalwindow/generalwindowitem.cpp
++++ b/src/client/frontend/gui/preferenceswindow/generalwindow/generalwindowitem.cpp
+@@ -1,6 +1,7 @@
+ #include "generalwindowitem.h"
+ 
+ #include <QDesktopServices>
++#include <QFile>
+ #include <QPainter>
+ #include <QSystemTrayIcon>
+ #include "utils/hardcodedsettings.h"
+@@ -38,7 +39,11 @@ GeneralWindowItem::GeneralWindowItem(ScalableGraphicsObject *parent, Preferences
+     checkBoxLaunchOnStart_ = new ToggleItem(launchOnStartGroup_);
+     checkBoxLaunchOnStart_->setIcon(ImageResourcesSvg::instance().getIndependentPixmap("preferences/LAUNCH_AT_STARTUP"));
+     checkBoxLaunchOnStart_->setState(preferences->isLaunchOnStartup());
+-    connect(checkBoxLaunchOnStart_, &ToggleItem::stateChanged, this, &GeneralWindowItem::onIsLaunchOnStartupClicked);
++    if (QFile::exists("/etc/windscribe/nix-autostart")) {
++        checkBoxLaunchOnStart_->setEnabled(false);
++    } else {
++        connect(checkBoxLaunchOnStart_, &ToggleItem::stateChanged, this, &GeneralWindowItem::onIsLaunchOnStartupClicked);
++    }
+     launchOnStartGroup_->addItem(checkBoxLaunchOnStart_);
+     addItem(launchOnStartGroup_);
+ 
+@@ -248,7 +253,11 @@ void GeneralWindowItem::onUpdateChannelItemChanged(QVariant o)
+ 
+ void GeneralWindowItem::onLanguageChanged()
+ {
+-    checkBoxLaunchOnStart_->setDescription(tr("Run Windscribe when your device starts."));
++    if (QFile::exists("/etc/windscribe/nix-autostart")) {
++        checkBoxLaunchOnStart_->setDescription(tr("Managed internally."));
++    } else {
++        checkBoxLaunchOnStart_->setDescription(tr("Run Windscribe when your device starts."));
++    }
+     checkBoxLaunchOnStart_->setCaption(tr("Launch on Startup"));
+     checkBoxStartMinimized_->setDescription(tr("Launch Windscribe in a minimized state."));
+     checkBoxStartMinimized_->setCaption(tr("Start Minimized"));
