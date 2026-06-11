@@ -1,0 +1,67 @@
+From f28a663a82a80cd0b9b531e3ab3dd80fbeaba8de Mon Sep 17 00:00:00 2001
+From: windscribe-eva-01 <146979650+windscribe-eva-01@user.noreply.github.com>
+Date: Fri, 5 Jun 2026 16:15:06 +0300
+Subject: [PATCH] Export SSL_OP_LEGACY_EC_POINT_FORMATS OpenSSL option
+
+---
+ include/curl/curl.h | 1 +
+ lib/setopt.c        | 1 +
+ lib/urldata.h       | 1 +
+ lib/vtls/openssl.c  | 5 +++++
+ 4 files changed, 8 insertions(+)
+
+diff --git a/include/curl/curl.h b/include/curl/curl.h
+index 9c82e36bb7..99484ce2a2 100644
+--- a/include/curl/curl.h
++++ b/include/curl/curl.h
+@@ -963,6 +963,7 @@ typedef enum {
+ 
+ #define CURLSSLOPT_TLSEXT_PADDING (1<<7)
+ #define CURLSSLOPT_TLSEXT_PADDING_SUPER (1<<8)
++#define CURLSSLOPT_OP_LEGACY_EC_POINT_FORMATS (1<<9)
+ 
+ /* The default connection attempt delay in milliseconds for happy eyeballs.
+    CURLOPT_HAPPY_EYEBALLS_TIMEOUT_MS.3 and happy-eyeballs-timeout-ms.d document
+diff --git a/lib/setopt.c b/lib/setopt.c
+index 982b2025d4..a3e3d6c6b4 100644
+--- a/lib/setopt.c
++++ b/lib/setopt.c
+@@ -421,6 +421,7 @@ static void set_ssl_options(struct ssl_config_data *ssl,
+   ssl->earlydata = !!(arg & CURLSSLOPT_EARLYDATA);
+   ssl->tlsext_padding = !!(arg & CURLSSLOPT_TLSEXT_PADDING);
+   ssl->tlsext_padding_super = !!(arg & CURLSSLOPT_TLSEXT_PADDING_SUPER);
++  ssl->op_legacy_ec_point_formats = !!(arg & CURLSSLOPT_OP_LEGACY_EC_POINT_FORMATS);
+ }
+ #endif
+ 
+diff --git a/lib/urldata.h b/lib/urldata.h
+index 01a919ce28..b43ee934cd 100644
+--- a/lib/urldata.h
++++ b/lib/urldata.h
+@@ -272,6 +272,7 @@ struct ssl_config_data {
+   BIT(custom_cablob); /* application has set custom CA blob */
+   BIT(tlsext_padding);
+   BIT(tlsext_padding_super);
++  BIT(op_legacy_ec_point_formats);
+ };
+ 
+ struct ssl_general_config {
+diff --git a/lib/vtls/openssl.c b/lib/vtls/openssl.c
+index 04da07cc3c..a1ed441335 100644
+--- a/lib/vtls/openssl.c
++++ b/lib/vtls/openssl.c
+@@ -3820,6 +3820,11 @@ CURLcode Curl_ossl_ctx_init(struct ossl_ctx *octx,
+     ctx_options |= (ctx_option_t)SSL_OP_TLSEXT_PADDING_SUPER;
+ #endif
+ 
++#ifdef SSL_OP_LEGACY_EC_POINT_FORMATS
++  if(ssl_config->op_legacy_ec_point_formats)
++    ctx_options |= (ctx_option_t)SSL_OP_LEGACY_EC_POINT_FORMATS;
++#endif
++
+   DEBUGASSERT(ssl_version_min != CURL_SSLVERSION_DEFAULT);
+   switch(ssl_version_min) {
+   case CURL_SSLVERSION_SSLv2:
+-- 
+2.54.0
+
