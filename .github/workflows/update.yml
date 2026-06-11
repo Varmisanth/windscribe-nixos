@@ -1,0 +1,64 @@
+name: update
+on:
+  schedule:
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: experimental-features = nix-command flakes
+
+      - name: Check upstream
+        id: check
+        run: |
+          LATEST=$(curl -s https://api.github.com/repos/Windscribe/Desktop-App/releases/latest | jq -r .tag_name | sed 's/^v//')
+          if [ -z "$LATEST" ] || [ "$LATEST" = "null" ]; then
+            echo "Error: Could not fetch latest version" >&2
+            exit 1
+          fi
+          CURRENT=$(grep -oP 'version = "\K[0-9.]+' pkgs/app/desktop-app.nix | head -1)
+          echo "latest=$LATEST" >> $GITHUB_OUTPUT
+          echo "current=$CURRENT" >> $GITHUB_OUTPUT
+          if [ "$LATEST" != "$CURRENT" ]; then
+            echo "needs=true" >> $GITHUB_OUTPUT
+          else
+            echo "needs=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Update version + hash
+        if: steps.check.outputs.needs == 'true'
+        run: |
+          NEW=${{ steps.check.outputs.latest }}
+          NEW_HASH=$(nix flake prefetch "github:Windscribe/Desktop-App/v$NEW" --json | jq -r '.hash // empty')
+          if [ -z "$NEW_HASH" ]; then
+            echo "Error: Could not fetch hash for version $NEW" >&2
+            exit 1
+          fi
+          sed -i "s/version = \"[0-9.]*\"/version = \"$NEW\"/" pkgs/app/desktop-app.nix
+          sed -i "s|hash = \"sha256-[A-Za-z0-9+/=]*\";|hash = \"$NEW_HASH\";|" pkgs/app/desktop-app.nix
+
+      - name: Open PR
+        if: steps.check.outputs.needs == 'true'
+        uses: peter-evans/create-pull-request@v8
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          title: "deps: bump Windscribe to v${{ steps.check.outputs.latest }}"
+          body: |
+            Auto-generated from upstream Windscribe Desktop-App.
+
+            **${{ steps.check.outputs.current }}** → **${{ steps.check.outputs.latest }}**
+
+            Release notes: https://github.com/Windscribe/Desktop-App/releases/tag/v${{ steps.check.outputs.latest }}
+
+            Review release notes for vendored dependency version changes — may require manual updates to pkgs/.
+          branch: update/windscribe-${{ steps.check.outputs.latest }}
+          commit-message: "deps: bump Windscribe to v${{ steps.check.outputs.latest }}"
