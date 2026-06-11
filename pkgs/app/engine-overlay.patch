@@ -1,0 +1,170 @@
+diff --git a/src/client/engine/engine/engine.cpp b/src/client/engine/engine/engine.cpp
+index f2161ed..401e038 100644
+--- a/src/client/engine/engine/engine.cpp
++++ b/src/client/engine/engine/engine.cpp
+@@ -2,7 +2,10 @@
+ 
+ #include <QCoreApplication>
+ #include <QCryptographicHash>
++#include <QDir>
++#include <QFile>
+ #include <QFileInfo>
++#include <QJsonDocument>
+ #include <QPointer>
+ #include <spdlog/spdlog.h>
+ #include <wsnet/WSNet.h>
+@@ -716,6 +719,13 @@ void Engine::initPart2()
+             onFailOverTryingBackupEndpoint();
+         });
+     });
++    // windscribe-nixos: isIgnoreSslErrors is session-only upstream (set over IPC); seed it from the
++    // declarative overlay so programs.windscribe.settings.ignoreSslErrors still takes effect.
++    {
++        const QJsonObject decl = readDeclarativeSettings();
++        if (decl.contains("isIgnoreSslErrors") && decl["isIgnoreSslErrors"].isBool())
++            ignoreSslErrors_ = decl["isIgnoreSslErrors"].toBool();
++    }
+     WSNet::instance()->serverAPI()->setIgnoreSslErrors(ignoreSslErrors_);
+     WSNet::instance()->bridgeAPI()->setIgnoreSslErrors(ignoreSslErrors_);
+     updateApiResolutionSettingsInWsnet();
+@@ -1202,6 +1212,8 @@ void Engine::logoutImplAfterDisconnect(bool keepFirewallOn)
+         WSNet::instance()->apiResourcersManager()->logout();
+         isLoggedIn_ = false;
+         tryLoginNextConnectOrDisconnect_ = false;
++        // windscribe-nixos: the next account gets the declarative R.O.B.E.R.T. overlay too.
++        robertOverlayApplied_ = false;
+     }
+ 
+     if (connectionManager_) {
+@@ -2336,23 +2348,90 @@ void Engine::onEmergencyConnectionError(ConnectError err, const CurrentConnectio
+ 
+ void Engine::getRobertFiltersImpl()
+ {
++    if (robertFiltersRequestInFlight_)
++        return;
++    robertFiltersRequestInFlight_ = true;
+     auto callback = [this](ServerApiRetCode serverApiRetCode, const std::string &jsonData)
+     {
+-        if (serverApiRetCode == ServerApiRetCode::kSuccess) {
+-            api_responses::RobertFilters filters(jsonData);
+-            emit robertFiltersUpdated(true, filters.filters());
+-        } else {
+-            emit robertFiltersUpdated(false, QVector<api_responses::RobertFilter>());
+-        }
++        // wsnet invokes this on its own thread: marshal the result back into the engine thread,
++        // like the ApiResourcesManager callback does in init().
++        QMetaObject::invokeMethod(this, [this, serverApiRetCode, jsonData] {
++            robertFiltersRequestInFlight_ = false;
++            if (serverApiRetCode == ServerApiRetCode::kSuccess) {
++                api_responses::RobertFilters filters(jsonData);
++                QVector<api_responses::RobertFilter> list = filters.filters();
++                if (list.isEmpty() || !isLoggedIn_) {
++                    // A body-level error surfaces as kSuccess with an empty filter list, and a
++                    // response arriving after logout must not latch state for the next account.
++                    // Leave the overlay unapplied so a later event retries it.
++                    robertOverlayApplied_ = false;
++                    emit robertFiltersUpdated(false, QVector<api_responses::RobertFilter>());
++                    return;
++                }
++                if (!robertOverlayApplied_)
++                    list = applyDeclarativeRobertOverlay(list);
++                robertOverlayApplied_ = true;
++                emit robertFiltersUpdated(true, list);
++            } else {
++                emit robertFiltersUpdated(false, QVector<api_responses::RobertFilter>());
++            }
++        });
+     };
+     WSNet::instance()->serverAPI()->getRobertFilters(WSNet::instance()->apiResourcersManager()->authHash(), callback);
+ }
+ 
++QJsonObject Engine::readDeclarativeSettings()
++{
++    const QStringList declPaths = {
++        QDir::homePath() + "/.config/windscribe/settings.json",
++        "/etc/windscribe/settings.json"
++    };
++    for (const QString &path : declPaths) {
++        QFile decl(path);
++        if (!decl.exists() || !decl.open(QIODevice::ReadOnly))
++            continue;
++        const QJsonDocument doc = QJsonDocument::fromJson(decl.readAll());
++        decl.close();
++        if (doc.isObject())
++            return doc.object();
++    }
++    return QJsonObject();
++}
++
++QVector<api_responses::RobertFilter> Engine::applyDeclarativeRobertOverlay(const QVector<api_responses::RobertFilter> &filters)
++{
++    const QJsonObject obj = readDeclarativeSettings();
++    if (!obj.contains("robert") || !obj["robert"].isObject())
++        return filters;
++    const QJsonObject robertConfig = obj["robert"].toObject();
++    if (robertConfig.isEmpty())
++        return filters;
++
++    QVector<api_responses::RobertFilter> applied = filters;
++    for (api_responses::RobertFilter &filter : applied) {
++        if (!robertConfig.contains(filter.id) || !robertConfig[filter.id].isDouble())
++            continue;
++        const int desired = robertConfig[filter.id].toInt();
++        if (filter.status == desired)
++            continue;
++        filter.status = desired;
++        setRobertFilterImpl(filter);
++    }
++    return applied;
++}
++
+ void Engine::setRobertFilterImpl(const api_responses::RobertFilter &filter)
+ {
+     auto callback = [this](ServerApiRetCode serverApiRetCode, const std::string &jsonData)
+     {
+-        emit setRobertFilterFinished(serverApiRetCode == ServerApiRetCode::kSuccess);
++        QMetaObject::invokeMethod(this, [this, serverApiRetCode] {
++            if (serverApiRetCode != ServerApiRetCode::kSuccess) {
++                // The declarative overlay showed the desired state, but the server rejected it.
++                // Unlatch so the next filter refresh applies the overlay again.
++                robertOverlayApplied_ = false;
++            }
++            emit setRobertFilterFinished(serverApiRetCode == ServerApiRetCode::kSuccess);
++        });
+     };
+ 
+     WSNet::instance()->serverAPI()->setRobertFilter(WSNet::instance()->apiResourcersManager()->authHash(), filter.id.toStdString(), filter.status,  callback);
+@@ -2647,6 +2726,11 @@ void Engine::onApiResourcesManagerReadyForLogin(bool isLoginFromSavedSettings)
+         qCWarning(LOG_BASIC) << "Engine::onApiResourcesManagerReadyForLogin: Port map is invalid:" << WSNet::instance()->apiResourcersManager()->portMap();
+     }
+ 
++    // windscribe-nixos: apply the declarative R.O.B.E.R.T. overlay on every sign-in, restored or typed,
++    // without waiting for the preferences page to ask for the filters.
++    if (!robertOverlayApplied_)
++        getRobertFiltersImpl();
++
+     emit loginFinished(portMap);
+ }
+ 
+diff --git a/src/client/engine/engine/engine.h b/src/client/engine/engine/engine.h
+index a2d77b2..2ca8745 100644
+--- a/src/client/engine/engine/engine.h
++++ b/src/client/engine/engine/engine.h
+@@ -317,6 +317,8 @@ private slots:
+     void getRobertFiltersImpl();
+     void setRobertFilterImpl(const api_responses::RobertFilter &filter);
+     void syncRobertImpl();
++    static QJsonObject readDeclarativeSettings();
++    QVector<api_responses::RobertFilter> applyDeclarativeRobertOverlay(const QVector<api_responses::RobertFilter> &filters);
+ 
+     void onCustomConfigsChanged();
+ 
+@@ -351,6 +353,8 @@ private slots:
+ private:
+     void initPart2();
+     void updateProxySettings();
++    bool robertOverlayApplied_ = false;
++    bool robertFiltersRequestInFlight_ = false;
+ 
+ #ifdef Q_OS_WIN
+     void enableDohSettings();
