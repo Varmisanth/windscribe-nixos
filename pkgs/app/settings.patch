@@ -1,0 +1,286 @@
+diff --git a/src/client/client-common/types/enginesettings.cpp b/src/client/client-common/types/enginesettings.cpp
+index a6c93fe..9fa0286 100644
+--- a/src/client/client-common/types/enginesettings.cpp
++++ b/src/client/client-common/types/enginesettings.cpp
+@@ -1,5 +1,7 @@
+ #include "enginesettings.h"
+ 
++#include <QDir>
++#include <QFile>
+ #include <QJsonDocument>
+ #include <filesystem>
+ 
+@@ -139,6 +141,44 @@ bool EngineSettings::loadFromSettings()
+     fromIni(ini);
+ #endif
+ 
++    {
++        const QStringList prefPaths = {
++            QDir::homePath() + "/.config/windscribe/preferences.json",
++            "/etc/windscribe/preferences.json"
++        };
++        for (const QString &path : prefPaths) {
++            QFile pref(path);
++            if (!pref.exists() || !pref.open(QIODevice::ReadOnly))
++                continue;
++            const QJsonDocument doc = QJsonDocument::fromJson(pref.readAll());
++            pref.close();
++            if (!doc.isObject())
++                continue;
++            const QJsonObject obj = doc.object();
++            if (obj.contains("engineSettings") && obj["engineSettings"].isObject())
++                d->fromJson(obj["engineSettings"].toObject());
++            break;
++        }
++    }
++    {
++        const QStringList declPaths = {
++            QDir::homePath() + "/.config/windscribe/settings.json",
++            "/etc/windscribe/settings.json"
++        };
++        for (const QString &path : declPaths) {
++            QFile decl(path);
++            if (!decl.exists() || !decl.open(QIODevice::ReadOnly))
++                continue;
++            const QJsonDocument doc = QJsonDocument::fromJson(decl.readAll());
++            decl.close();
++            if (!doc.isObject())
++                continue;
++            const QJsonObject obj = doc.object();
++            d->fromJson(obj);
++            break;
++        }
++    }
++
+     return bLoaded;
+ }
+ 
+@@ -571,7 +611,7 @@ void EngineSettingsData::fromJson(const QJsonObject &json)
+     }
+ 
+     if (json.contains(kJsonMacAddrSpoofingProp) && json[kJsonMacAddrSpoofingProp].isObject()) {
+-        macAddrSpoofing = types::MacAddrSpoofing(json[kJsonMacAddrSpoofingProp].toObject());
++        macAddrSpoofing.applyJsonOverlay(json[kJsonMacAddrSpoofingProp].toObject());
+     }
+ 
+     if (json.contains(kJsonPacketSizeProp) && json[kJsonPacketSizeProp].isObject()) {
+diff --git a/src/client/client-common/types/guisettings.h b/src/client/client-common/types/guisettings.h
+index c9e473e..381e6f1 100644
+--- a/src/client/client-common/types/guisettings.h
++++ b/src/client/client-common/types/guisettings.h
+@@ -20,6 +20,7 @@ struct GuiSettings
+ 
+     GuiSettings() = default;
+     GuiSettings(const QJsonObject& json);
++    void applyJsonOverlay(const QJsonObject &json);
+ 
+     APP_SKIN appSkin = APP_SKIN_ALPHA;
+     BackgroundSettings backgroundSettings;
+@@ -330,4 +331,38 @@ inline GuiSettings::GuiSettings(const QJsonObject &json)
+     }
+ }
+ 
++inline void GuiSettings::applyJsonOverlay(const QJsonObject &json)
++{
++    if (json.contains(kJsonAppSkinProp) && json[kJsonAppSkinProp].isDouble())
++        appSkin = enumFromInt<APP_SKIN>(json[kJsonAppSkinProp].toInt());
++    if (json.contains(kJsonBackgroundSettingsProp) && json[kJsonBackgroundSettingsProp].isObject())
++        backgroundSettings = types::BackgroundSettings(json[kJsonBackgroundSettingsProp].toObject());
++    if (json.contains(kJsonIsAutoConnectProp) && json[kJsonIsAutoConnectProp].isBool())
++        isAutoConnect = json[kJsonIsAutoConnectProp].toBool();
++    if (json.contains(kJsonIsAutoSecureNetworksProp) && json[kJsonIsAutoSecureNetworksProp].isBool())
++        isAutoSecureNetworks = json[kJsonIsAutoSecureNetworksProp].toBool();
++    if (json.contains(kJsonIsLaunchOnStartupProp) && json[kJsonIsLaunchOnStartupProp].isBool())
++        isLaunchOnStartup = json[kJsonIsLaunchOnStartupProp].toBool();
++    if (json.contains(kJsonIsMinimizeAndCloseToTrayProp) && json[kJsonIsMinimizeAndCloseToTrayProp].isBool())
++        isMinimizeAndCloseToTray = json[kJsonIsMinimizeAndCloseToTrayProp].toBool();
++    if (json.contains(kJsonIsShowLocationHealthProp) && json[kJsonIsShowLocationHealthProp].isBool())
++        isShowLocationHealth = json[kJsonIsShowLocationHealthProp].toBool();
++    if (json.contains(kJsonIsShowNotificationsProp) && json[kJsonIsShowNotificationsProp].isBool())
++        isShowNotifications = json[kJsonIsShowNotificationsProp].toBool();
++    if (json.contains(kJsonIsStartMinimizedProp) && json[kJsonIsStartMinimizedProp].isBool())
++        isStartMinimized = json[kJsonIsStartMinimizedProp].toBool();
++    if (json.contains(kJsonOrderLocationProp) && json[kJsonOrderLocationProp].isDouble())
++        orderLocation = enumFromInt<ORDER_LOCATION_TYPE>(json[kJsonOrderLocationProp].toInt());
++    if (json.contains(kJsonTrayIconColourProp) && json[kJsonTrayIconColourProp].isDouble())
++        trayIconColor = TRAY_ICON_COLOR_fromInt(json[kJsonTrayIconColourProp].toInt());
++    else if (json.contains(kJsonTrayIconColorProp) && json[kJsonTrayIconColorProp].isDouble())
++        trayIconColor = TRAY_ICON_COLOR_fromInt(json[kJsonTrayIconColorProp].toInt());
++    if (json.contains(kJsonShareProxyGatewayProp) && json[kJsonShareProxyGatewayProp].isObject())
++        shareProxyGateway = types::ShareProxyGateway(json[kJsonShareProxyGatewayProp].toObject());
++    if (json.contains(kJsonSplitTunnelingProp) && json[kJsonSplitTunnelingProp].isObject())
++        splitTunneling.applyJsonOverlay(json[kJsonSplitTunnelingProp].toObject());
++    if (json.contains(kJsonSoundSettingsProp) && json[kJsonSoundSettingsProp].isObject())
++        soundSettings = types::SoundSettings(json[kJsonSoundSettingsProp].toObject());
++}
++
+ } // types namespace
+diff --git a/src/client/client-common/types/macaddrspoofing.h b/src/client/client-common/types/macaddrspoofing.h
+index 6b85ccd..9b52475 100644
+--- a/src/client/client-common/types/macaddrspoofing.h
++++ b/src/client/client-common/types/macaddrspoofing.h
+@@ -22,6 +22,11 @@ struct MacAddrSpoofing
+     MacAddrSpoofing() {}
+ 
+     MacAddrSpoofing(const QJsonObject &json)
++    {
++        applyJsonOverlay(json);
++    }
++
++    void applyJsonOverlay(const QJsonObject &json)
+     {
+         if (json.contains(kJsonIsEnabledProp) && json[kJsonIsEnabledProp].isBool()) {
+             isEnabled = json[kJsonIsEnabledProp].toBool();
+diff --git a/src/client/client-common/types/splittunneling.h b/src/client/client-common/types/splittunneling.h
+index bccb980..1bf6436 100644
+--- a/src/client/client-common/types/splittunneling.h
++++ b/src/client/client-common/types/splittunneling.h
+@@ -310,6 +310,11 @@ struct SplitTunneling
+     SplitTunneling() = default;
+ 
+     SplitTunneling(const QJsonObject &json)
++    {
++        applyJsonOverlay(json);
++    }
++
++    void applyJsonOverlay(const QJsonObject &json)
+     {
+         if (json.contains(kJsonSettingsProp) && json[kJsonSettingsProp].isObject()) {
+             settings = SplitTunnelingSettings(json[kJsonSettingsProp].toObject());
+diff --git a/src/client/frontend/frontend-common/backend/preferences/preferences.cpp b/src/client/frontend/frontend-common/backend/preferences/preferences.cpp
+index 2a48eb5..6abea8f 100644
+--- a/src/client/frontend/frontend-common/backend/preferences/preferences.cpp
++++ b/src/client/frontend/frontend-common/backend/preferences/preferences.cpp
+@@ -1,5 +1,9 @@
+ #include "preferences.h"
+ 
++#include <QDir>
++#include <QFile>
++#include <QJsonDocument>
++
+ #ifdef CLI_ONLY
+ #include <QFile>
+ #endif
+@@ -934,6 +938,57 @@ void Preferences::loadGuiSettings()
+     LinuxUtils::migrateSplitTunnelingFlatpakApps(guiSettings_.splitTunneling.apps);
+ #endif
+ 
++#ifdef Q_OS_LINUX
++    {
++        const QStringList prefPaths = {
++            QDir::homePath() + "/.config/windscribe/preferences.json",
++            "/etc/windscribe/preferences.json"
++        };
++        for (const QString &path : prefPaths) {
++            QFile pref(path);
++            if (!pref.exists() || !pref.open(QIODevice::ReadOnly))
++                continue;
++            const QJsonDocument doc = QJsonDocument::fromJson(pref.readAll());
++            pref.close();
++            if (!doc.isObject())
++                continue;
++            const QJsonObject obj = doc.object();
++            if (obj.contains("guiSettings") && obj["guiSettings"].isObject())
++                guiSettings_ = types::GuiSettings(obj["guiSettings"].toObject());
++            if (obj.contains("advancedParameters") && obj["advancedParameters"].isObject())
++                ExtraConfig::instance().fromJson(obj["advancedParameters"].toObject());
++            if (obj.contains("persistentState") && obj["persistentState"].isObject())
++                PersistentState::instance().fromJson(obj["persistentState"].toObject());
++            break;
++        }
++    }
++    {
++        const QStringList declPaths = {
++            QDir::homePath() + "/.config/windscribe/settings.json",
++            "/etc/windscribe/settings.json"
++        };
++        for (const QString &path : declPaths) {
++            QFile decl(path);
++            if (!decl.exists() || !decl.open(QIODevice::ReadOnly))
++                continue;
++            const QJsonDocument doc = QJsonDocument::fromJson(decl.readAll());
++            decl.close();
++            if (!doc.isObject())
++                continue;
++            const QJsonObject obj = doc.object();
++            guiSettings_.applyJsonOverlay(obj);
++            if (obj.contains("advancedParameters") && obj["advancedParameters"].isObject())
++                ExtraConfig::instance().fromJson(obj["advancedParameters"].toObject());
++            if (obj.contains("persistentState") && obj["persistentState"].isObject())
++                PersistentState::instance().fromJson(obj["persistentState"].toObject());
++            break;
++        }
++    }
++    // The overlays assign enum-typed fields straight from JSON ints; clamp them the same way the
++    // other load paths do so an out-of-range value can't reach the UI.
++    guiSettings_.validate();
++#endif
++
+     qCInfo(LOG_BASIC) << "GUI settings" << guiSettings_;
+ }
+ 
+diff --git a/src/client/frontend/frontend-common/locations/locationsmodel_manager.cpp b/src/client/frontend/frontend-common/locations/locationsmodel_manager.cpp
+index cedf974..435516f 100644
+--- a/src/client/frontend/frontend-common/locations/locationsmodel_manager.cpp
++++ b/src/client/frontend/frontend-common/locations/locationsmodel_manager.cpp
+@@ -1,4 +1,10 @@
+ #include "locationsmodel_manager.h"
++
++#include <QDir>
++#include <QFile>
++#include <QJsonArray>
++#include <QJsonDocument>
++
+ #include "locationsmodel_roles.h"
+ #include "model/proxymodels/cities_proxymodel.h"
+ #include "model/proxymodels/favoritecities_proxymodel.h"
+@@ -41,6 +47,49 @@ LocationsModelManager::LocationsModelManager(QObject *parent) : QObject(parent)
+ void LocationsModelManager::updateLocations(const LocationID &bestLocation, const QVector<types::Location> &locations)
+ {
+     locationsModel_->updateLocations(bestLocation, locations);
++
++    {
++        const QStringList prefPaths = {
++            QDir::homePath() + "/.config/windscribe/preferences.json",
++            "/etc/windscribe/preferences.json"
++        };
++        for (const QString &path : prefPaths) {
++            QFile pref(path);
++            if (!pref.exists() || !pref.open(QIODevice::ReadOnly))
++                continue;
++            const QJsonDocument doc = QJsonDocument::fromJson(pref.readAll());
++            pref.close();
++            if (!doc.isObject())
++                continue;
++            const QJsonObject obj = doc.object();
++            if (obj.contains("renamedLocations") && obj["renamedLocations"].isObject())
++                locationsModel_->setRenamedLocations(obj["renamedLocations"].toObject());
++            if (obj.contains("favouriteLocations") && obj["favouriteLocations"].isArray())
++                locationsModel_->setFavoriteLocationsFromJson(obj["favouriteLocations"].toArray());
++            break;
++        }
++    }
++    {
++        const QStringList declPaths = {
++            QDir::homePath() + "/.config/windscribe/settings.json",
++            "/etc/windscribe/settings.json"
++        };
++        for (const QString &path : declPaths) {
++            QFile decl(path);
++            if (!decl.exists() || !decl.open(QIODevice::ReadOnly))
++                continue;
++            const QJsonDocument doc = QJsonDocument::fromJson(decl.readAll());
++            decl.close();
++            if (!doc.isObject())
++                continue;
++            const QJsonObject obj = doc.object();
++            if (obj.contains("renamedLocations") && obj["renamedLocations"].isObject())
++                locationsModel_->setRenamedLocations(obj["renamedLocations"].toObject());
++            if (obj.contains("favouriteLocations") && obj["favouriteLocations"].isArray())
++                locationsModel_->setFavoriteLocationsFromJson(obj["favouriteLocations"].toArray());
++            break;
++        }
++    }
+ }
+ 
+ void LocationsModelManager::updateDeviceName(const QString &staticIpDeviceName)
