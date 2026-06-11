@@ -1,0 +1,204 @@
+diff --git a/src/client/engine/engine/autoupdater/downloadhelper.cpp b/src/client/engine/engine/autoupdater/downloadhelper.cpp
+index e449afd..bdac94d 100644
+--- a/src/client/engine/engine/autoupdater/downloadhelper.cpp
++++ b/src/client/engine/engine/autoupdater/downloadhelper.cpp
+@@ -23,7 +23,7 @@ DownloadHelper::DownloadHelper(QObject *parent, const QString &platform) : QObje
+   , state_(DOWNLOAD_STATE_INIT)
+ 
+ {
+-    removeAutoUpdateInstallerFiles();
++    // windscribe-nixos: auto-update install disabled, no stale installer files to remove
+ }
+ 
+ DownloadHelper::~DownloadHelper()
+diff --git a/src/client/engine/engine/engine.cpp b/src/client/engine/engine/engine.cpp
+index 4cbd0cd..582479a 100644
+--- a/src/client/engine/engine/engine.cpp
++++ b/src/client/engine/engine/engine.cpp
+@@ -5,7 +5,11 @@
+ #include <QDir>
+ #include <QFile>
+ #include <QFileInfo>
++#include <QJsonArray>
+ #include <QJsonDocument>
++#include <QJsonObject>
++#include <QNetworkAccessManager>
++#include <QNetworkReply>
+ #include <QPointer>
+ #include <spdlog/spdlog.h>
+ #include <wsnet/WSNet.h>
+@@ -3161,17 +3165,45 @@ void Engine::enableDohSettings()
+ 
+ void Engine::doCheckUpdate()
+ {
+-    UPDATE_CHANNEL channel = engineSettings_.updateChannel();
+-    if (overrideUpdateChannelWithInternal_) {
+-        qCInfo(LOG_BASIC) << "Overriding update channel: internal";
+-        channel = UPDATE_CHANNEL_INTERNAL;
+-    }
+-
+-    QString osVersion, osBuild;
+-    Utils::getOSVersionAndBuild(osVersion, osBuild);
++    // windscribe-nixos: query our flake repository on GitHub instead of upstream Windscribe API
++    static QNetworkAccessManager *nam = nullptr;
++    if (!nam) nam = new QNetworkAccessManager(this);
++
++    QNetworkRequest req(QUrl("https://api.github.com/repos/Varmisanth/windscribe-nixos/tags"));
++    req.setHeader(QNetworkRequest::UserAgentHeader, "windscribe-nixos");
++    QNetworkReply *reply = nam->get(req);
++
++    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
++        QByteArray data = reply->readAll();
++        reply->deleteLater();
++
++        QJsonDocument doc = QJsonDocument::fromJson(data);
++        QJsonArray tags = doc.array();
++        QString latestVersion;
++        if (!tags.isEmpty()) {
++            QString tagName = tags.first().toObject()["name"].toString();
++            latestVersion = tagName.startsWith("v") ? tagName.mid(1) : tagName;
++            int dashIdx = latestVersion.indexOf("-");
++            if (dashIdx != -1) latestVersion = latestVersion.left(dashIdx);
++        }
+ 
+-    WSNet::instance()->apiResourcersManager()->checkUpdate((UpdateChannel)channel, AppVersion::instance().version().toStdString(), AppVersion::instance().build().toStdString(),
+-                                                           osVersion.toStdString(), osBuild.toStdString());
++        // windscribe-nixos: flake handles upgrades, keep flag off.
++        bool updateNeeded = false;
++
++        QJsonObject payload;
++        payload["update_needed_flag"] = updateNeeded ? 1 : 0;
++        payload["latest_version"] = latestVersion;
++        payload["is_beta"] = 0;
++        payload["latest_build"] = 0;
++        payload["update_url"] = "https://github.com/Varmisanth/windscribe-nixos";
++        payload["supported"] = 1;
++        QJsonObject root;
++        root["data"] = payload;
++        QString jsonStr = QJsonDocument(root).toJson(QJsonDocument::Compact);
++
++        api_responses::CheckUpdate update(jsonStr.toStdString());
++        onCheckUpdateUpdated(update);
++    });
+ }
+ 
+ void Engine::loginImpl(bool isUseAuthHash, const QString &username, const QString &password, const QString &code2fa)
+diff --git a/src/client/frontend/gui/mainwindow.cpp b/src/client/frontend/gui/mainwindow.cpp
+index 2a51c43..ba50992 100644
+--- a/src/client/frontend/gui/mainwindow.cpp
++++ b/src/client/frontend/gui/mainwindow.cpp
+@@ -1526,17 +1526,14 @@ void MainWindow::onUpdateAppItemClick()
+ 
+ void MainWindow::onUpdateWindowAccept()
+ {
+-    downloadRunning_ = true;
+-    mainWindowController_->getUpdateWindow()->setProgress(0);
+-    mainWindowController_->getUpdateWindow()->startAnimation();
+-    mainWindowController_->getUpdateWindow()->changeToDownloadingScreen();
+-    backend_->sendUpdateVersion(static_cast<qint64>(this->winId()));
++    // windscribe-nixos: open flake repository instead of downloading .deb package
++    QDesktopServices::openUrl(QUrl("https://github.com/Varmisanth/windscribe-nixos"));
++    mainWindowController_->changeWindow(MainWindowController::WINDOW_ID_CONNECT);
+ }
+ 
+ void MainWindow::onIpcUpdate()
+ {
+-    onUpdateAppItemClick();
+-    onUpdateWindowAccept();
++    QDesktopServices::openUrl(QUrl("https://github.com/Varmisanth/windscribe-nixos"));
+ }
+ 
+ void MainWindow::onUpdateWindowCancel()
+diff --git a/src/client/frontend/gui/preferenceswindow/generalwindow/generalwindowitem.cpp b/src/client/frontend/gui/preferenceswindow/generalwindow/generalwindowitem.cpp
+index 2090098..be893c0 100644
+--- a/src/client/frontend/gui/preferenceswindow/generalwindow/generalwindowitem.cpp
++++ b/src/client/frontend/gui/preferenceswindow/generalwindow/generalwindowitem.cpp
+@@ -26,7 +26,6 @@ GeneralWindowItem::GeneralWindowItem(ScalableGraphicsObject *parent, Preferences
+     connect(preferences, &Preferences::isDockedToTrayChanged, this, &GeneralWindowItem::onIsDockedToTrayPreferencesChanged);
+     connect(preferences, &Preferences::languageChanged, this, &GeneralWindowItem::onLanguagePreferencesChanged);
+     connect(preferences, &Preferences::locationOrderChanged, this, &GeneralWindowItem::onLocationOrderPreferencesChanged);
+-    connect(preferences, &Preferences::updateChannelChanged, this, &GeneralWindowItem::onUpdateChannelPreferencesChanged);
+     connect(preferences, &Preferences::isStartMinimizedChanged, this, &GeneralWindowItem::onStartMinimizedPreferencesChanged);
+     connect(preferences, &Preferences::showLocationLoadChanged, this, &GeneralWindowItem::onShowLocationLoadPreferencesChanged);
+     connect(preferences, &Preferences::minimizeAndCloseToTrayChanged, this, &GeneralWindowItem::onMinimizeAndCloseToTrayPreferencesChanged);
+@@ -128,13 +127,6 @@ GeneralWindowItem::GeneralWindowItem(ScalableGraphicsObject *parent, Preferences
+     languageGroup_->addItem(comboBoxLanguage_);
+     addItem(languageGroup_);
+ 
+-    updateChannelGroup_ = new PreferenceGroup(this);
+-    comboBoxUpdateChannel_ = new ComboBoxItem(updateChannelGroup_);
+-    comboBoxUpdateChannel_->setIcon(ImageResourcesSvg::instance().getIndependentPixmap("preferences/UPDATE_CHANNEL"));
+-    connect(comboBoxUpdateChannel_, &ComboBoxItem::currentItemChanged, this, &GeneralWindowItem::onUpdateChannelItemChanged);
+-    updateChannelGroup_->addItem(comboBoxUpdateChannel_);
+-    addItem(updateChannelGroup_);
+-
+     connect(&LanguageController::instance(), &LanguageController::languageChanged, this, &GeneralWindowItem::onLanguageChanged);
+ 
+     versionGroup_ = new PreferenceGroup(this);
+@@ -241,16 +233,6 @@ void GeneralWindowItem::onLocationItemChanged(QVariant o)
+     preferences_->setLocationOrder((ORDER_LOCATION_TYPE)o.toInt());
+ }
+ 
+-void GeneralWindowItem::onUpdateChannelPreferencesChanged(const UPDATE_CHANNEL &c)
+-{
+-    comboBoxUpdateChannel_->setCurrentItem((int)c);
+-}
+-
+-void GeneralWindowItem::onUpdateChannelItemChanged(QVariant o)
+-{
+-    preferences_->setUpdateChannel((UPDATE_CHANNEL)o.toInt());
+-}
+-
+ void GeneralWindowItem::onLanguageChanged()
+ {
+     if (QFile::exists("/etc/windscribe/nix-autostart")) {
+@@ -300,17 +282,6 @@ void GeneralWindowItem::onLanguageChanged()
+     multiDesktopBehaviorItem_->setItems(enumToList<MULTI_DESKTOP_BEHAVIOR>(), preferences_->multiDesktopBehavior());
+ #endif
+ 
+-    comboBoxUpdateChannel_->setDescription(tr("Choose to receive stable, beta, or experimental builds."),
+-                                           QString("https://%1/features/update-channels").arg(HardcodedSettings::instance().windscribeServerUrl()));
+-    comboBoxUpdateChannel_->setLabelCaption(tr("Update Channel"));
+-    QList<QPair<QString, QVariant>> updateChannelList = enumToList<UPDATE_CHANNEL>();
+-    for (auto item : updateChannelList) {
+-        if (item.second == UPDATE_CHANNEL_INTERNAL) {
+-            updateChannelList.removeOne(item);
+-            break;
+-        }
+-    }
+-    comboBoxUpdateChannel_->setItems(updateChannelList, preferences_->updateChannel());
+     versionInfoItem_->setCaption(tr("Version"));
+ }
+ 
+@@ -325,7 +296,6 @@ void GeneralWindowItem::hideOpenPopups()
+ 
+     comboBoxLanguage_      ->hideMenu();
+     comboBoxLocationOrder_ ->hideMenu();
+-    comboBoxUpdateChannel_ ->hideMenu();
+ }
+ 
+ void GeneralWindowItem::onShowLocationLoadClicked(bool b)
+diff --git a/src/client/frontend/gui/preferenceswindow/generalwindow/generalwindowitem.h b/src/client/frontend/gui/preferenceswindow/generalwindow/generalwindowitem.h
+index 179a83f..0761c49 100644
+--- a/src/client/frontend/gui/preferenceswindow/generalwindow/generalwindowitem.h
++++ b/src/client/frontend/gui/preferenceswindow/generalwindow/generalwindowitem.h
+@@ -50,9 +50,6 @@ private slots:
+     void onLocationOrderPreferencesChanged(ORDER_LOCATION_TYPE o);
+     void onLocationItemChanged(QVariant o);
+ 
+-    void onUpdateChannelPreferencesChanged(const UPDATE_CHANNEL &c);
+-    void onUpdateChannelItemChanged(QVariant o);
+-
+     void onLanguageChanged();
+ 
+     void onShowLocationLoadPreferencesChanged(bool b);
+@@ -103,9 +100,6 @@ private:
+     PreferenceGroup *multiDesktopBehaviorGroup_;
+     ComboBoxItem *multiDesktopBehaviorItem_;
+ #endif
+-    PreferenceGroup *updateChannelGroup_;
+-    ComboBoxItem *comboBoxUpdateChannel_;
+-
+     PreferenceGroup *versionGroup_;
+     VersionInfoItem *versionInfoItem_;
+ };

@@ -1,0 +1,32 @@
+{
+  lib,
+  applyPatches,
+  fetchFromGitHub,
+  dos2unix,
+}:
+(applyPatches {
+  src = fetchFromGitHub {
+    owner = "Windscribe";
+    repo = "wsnet";
+    rev = "1.5.32";
+    hash = "sha256-W4qArEGc5Vk9HXoZlZxD8JEl9NRadJzZsKBYf5zZyOI=";
+  };
+  nativeBuildInputs = [ dos2unix ];
+  prePatch = ''
+    dos2unix CMakeLists.txt
+  '';
+  patches = [ ./openssl-targets.patch ];
+}).overrideAttrs
+  (
+    _: _: {
+      meta = {
+        description = "Cross-platform C++ networking library for Windscribe VPN clients";
+        homepage = "https://github.com/Windscribe/wsnet";
+        license = lib.licenses.gpl2Only;
+        maintainers = [
+          (import ../../maintainers.nix).varmisanth
+        ];
+        platforms = lib.platforms.unix;
+      };
+    }
+  )
