@@ -1,0 +1,113 @@
+--- a/src/client/engine/engine/engine.cpp
++++ b/src/client/engine/engine/engine.cpp
+@@ -2,6 +2,9 @@
+ 
+ #include <QCoreApplication>
+ #include <QCryptographicHash>
++#include <QDir>
++#include <QFile>
++#include <QJsonDocument>
+ #include <QPointer>
+ #include <spdlog/spdlog.h>
+ #include <wsnet/WSNet.h>
+@@ -681,6 +684,13 @@
+             onFailOverTryingBackupEndpoint(num, count);
+         });
+     });
++    // windscribe-nixos: isIgnoreSslErrors is session-only upstream (set over IPC); seed it from the
++    // declarative overlay so programs.windscribe.settings.ignoreSslErrors still takes effect.
++    {
++        const QJsonObject decl = readDeclarativeSettings();
++        if (decl.contains("isIgnoreSslErrors") && decl["isIgnoreSslErrors"].isBool())
++            ignoreSslErrors_ = decl["isIgnoreSslErrors"].toBool();
++    }
+     WSNet::instance()->serverAPI()->setIgnoreSslErrors(ignoreSslErrors_);
+     WSNet::instance()->bridgeAPI()->setIgnoreSslErrors(ignoreSslErrors_);
+     updateApiResolutionSettingsInWsnet();
+@@ -824,6 +834,10 @@
+     #else
+         emit initFinished(ENGINE_INIT_SUCCESS, isAuthHashExists, engineSettings_);
+     #endif
++
++        // windscribe-nixos: apply declarative R.O.B.E.R.T. overlay at startup, skip the preferences-page open trigger.
++        if (isAuthHashExists)
++            getRobertFiltersImpl();
+     }
+     else if (ret == INIT_HELPER_FAILED)
+     {
+@@ -2165,6 +2179,10 @@
+     {
+         if (serverApiRetCode == ServerApiRetCode::kSuccess) {
+             api_responses::RobertFilters filters(jsonData);
++            if (!robertOverlayApplied_) {
++                applyDeclarativeRobertOverlay(filters.filters());
++                robertOverlayApplied_ = true;
++            }
+             emit robertFiltersUpdated(true, filters.filters());
+         } else {
+             emit robertFiltersUpdated(false, QVector<api_responses::RobertFilter>());
+@@ -2173,6 +2191,45 @@
+     WSNet::instance()->serverAPI()->getRobertFilters(WSNet::instance()->apiResourcersManager()->authHash(), callback);
+ }
+ 
++QJsonObject Engine::readDeclarativeSettings()
++{
++    const QStringList declPaths = {
++        QDir::homePath() + "/.config/windscribe/settings.json",
++        "/etc/windscribe/settings.json"
++    };
++    for (const QString &path : declPaths) {
++        QFile decl(path);
++        if (!decl.exists() || !decl.open(QIODevice::ReadOnly))
++            continue;
++        const QJsonDocument doc = QJsonDocument::fromJson(decl.readAll());
++        decl.close();
++        if (doc.isObject())
++            return doc.object();
++    }
++    return QJsonObject();
++}
++
++void Engine::applyDeclarativeRobertOverlay(const QVector<api_responses::RobertFilter> &filters)
++{
++    const QJsonObject obj = readDeclarativeSettings();
++    if (!obj.contains("robert") || !obj["robert"].isObject())
++        return;
++    const QJsonObject robertConfig = obj["robert"].toObject();
++    if (robertConfig.isEmpty())
++        return;
++
++    for (const api_responses::RobertFilter &filter : filters) {
++        if (!robertConfig.contains(filter.id) || !robertConfig[filter.id].isDouble())
++            continue;
++        const int desired = robertConfig[filter.id].toInt();
++        if (filter.status == desired)
++            continue;
++        api_responses::RobertFilter updated = filter;
++        updated.status = desired;
++        setRobertFilterImpl(updated);
++    }
++}
++
+ void Engine::setRobertFilterImpl(const api_responses::RobertFilter &filter)
+ {
+     auto callback = [this](ServerApiRetCode serverApiRetCode, const std::string &jsonData)
+--- a/src/client/engine/engine/engine.h
++++ b/src/client/engine/engine/engine.h
+@@ -318,6 +318,8 @@
+     void getRobertFiltersImpl();
+     void setRobertFilterImpl(const api_responses::RobertFilter &filter);
+     void syncRobertImpl();
++    static QJsonObject readDeclarativeSettings();
++    void applyDeclarativeRobertOverlay(const QVector<api_responses::RobertFilter> &filters);
+ 
+     void onCustomConfigsChanged();
+ 
+@@ -352,6 +354,7 @@
+ private:
+     void initPart2();
+     void updateProxySettings();
++    bool robertOverlayApplied_ = false;
+ 
+ #ifdef Q_OS_WIN
+     void enableDohSettings();
