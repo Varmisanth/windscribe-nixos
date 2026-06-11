@@ -1,0 +1,10 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -975,2 +975,6 @@
+ 
+ endif (BUILD_TESTING)
++
++install(TARGETS openvpn
++   RUNTIME
++)

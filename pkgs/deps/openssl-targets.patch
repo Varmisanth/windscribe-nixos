@@ -1,0 +1,31 @@
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -51,7 +51,27 @@
+ configure_file(cmake/wsnet_version.h.in ${PROJECT_BINARY_DIR}/wsnet_version.h)
+ 
+ find_package(c-ares CONFIG REQUIRED)
+-find_package(OpenSSL REQUIRED)
++if(DEFINED WINDSCRIBE_OPENSSL_INCLUDE_DIR AND DEFINED WINDSCRIBE_OPENSSL_LIB_DIR)
++    if(NOT TARGET OpenSSL::SSL)
++        add_library(OpenSSL::SSL UNKNOWN IMPORTED)
++    endif()
++    set_target_properties(OpenSSL::SSL PROPERTIES
++        IMPORTED_LOCATION "${WINDSCRIBE_OPENSSL_LIB_DIR}/libssl.so"
++        INTERFACE_INCLUDE_DIRECTORIES "${WINDSCRIBE_OPENSSL_INCLUDE_DIR}")
++    if(NOT TARGET OpenSSL::Crypto)
++        add_library(OpenSSL::Crypto UNKNOWN IMPORTED)
++    endif()
++    set_target_properties(OpenSSL::Crypto PROPERTIES
++        IMPORTED_LOCATION "${WINDSCRIBE_OPENSSL_LIB_DIR}/libcrypto.so"
++        INTERFACE_INCLUDE_DIRECTORIES "${WINDSCRIBE_OPENSSL_INCLUDE_DIR}")
++    set(OPENSSL_FOUND TRUE)
++    set(OpenSSL_FOUND TRUE)
++elseif(TARGET OpenSSL::SSL)
++    set(OPENSSL_FOUND TRUE)
++    set(OpenSSL_FOUND TRUE)
++else()
++    find_package(OpenSSL REQUIRED)
++endif()
+ find_package(CURL CONFIG REQUIRED)
+ find_package(spdlog CONFIG REQUIRED)
+ find_package(RapidJSON CONFIG REQUIRED)
