@@ -1,0 +1,59 @@
+diff --git a/src/helper/linux/process_command.cpp b/src/helper/linux/process_command.cpp
+index d3f5784..9921f7d 100644
+--- a/src/helper/linux/process_command.cpp
++++ b/src/helper/linux/process_command.cpp
+@@ -579,8 +579,11 @@ std::string setMacAddress(const std::string &pars)
+     // The engine skips spoofing when NetworkManager is unavailable, but don't trust that judgment here:
+     // spoofing is applied via NM connection profiles, so without the daemon it cannot work.
+     if (!Utils::isNetworkManagerActive()) {
+-        spdlog::error("Can't set MAC address: NetworkManager is not active");
+-        return serializeResult(false);
++        // windscribe-nixos: NetworkManager is optional here, so fall back to iproute2.
++        Utils::executeCommand("ip", {"link", "set", "dev", interface, "down"});
++        const int ret = Utils::executeCommand("ip", {"link", "set", "dev", interface, "address", mac});
++        Utils::executeCommand("ip", {"link", "set", "dev", interface, "up"});
++        return serializeResult(ret == 0);
+     }
+ 
+     std::string out;
+diff --git a/src/helper/linux/utils.cpp b/src/helper/linux/utils.cpp
+index f9c6ac2..26d8907 100644
+--- a/src/helper/linux/utils.cpp
++++ b/src/helper/linux/utils.cpp
+@@ -168,7 +168,6 @@ bool isMacAddressSpoofed(const std::string &network)
+     return false;
+ }
+ 
+-#ifdef CLI_ONLY
+ static std::vector<std::string> getInterfaceNames()
+ {
+     std::string output;
+@@ -239,7 +238,6 @@ static std::string getCurrentMac(const std::string &ifname)
+     output.erase(output.find_last_not_of(" \n\r\t") + 1);
+     return output;
+ }
+-#endif
+ 
+ bool isNetworkManagerActive()
+ {
+@@ -275,7 +273,19 @@ bool resetMacAddresses(const std::string &ignoreNetwork)
+     // Spoofs are applied via NetworkManager profiles; without the daemon there is nothing to reset
+     // and every nmcli call below would just fail (e.g. NM-less distros, this runs at every helper boot).
+     if (!Utils::isNetworkManagerActive()) {
+-        spdlog::info("resetMacAddresses skipped: NetworkManager is not active");
++        // windscribe-nixos: NetworkManager is optional here, so reset via iproute2 instead.
++        for (const auto &interface : getInterfaceNames()) {
++            if (interface == ignoreNetwork) {
++                continue;
++            }
++            const std::string hwAddr = getHwMac(interface);
++            if (hwAddr != getCurrentMac(interface) && hwAddr != "not set") {
++                spdlog::info("Resetting MAC spoofing on {} (hw: {})", interface, hwAddr);
++                Utils::executeCommand("ip", {"link", "set", "dev", interface, "down"});
++                Utils::executeCommand("ip", {"link", "set", "dev", interface, "address", hwAddr});
++                Utils::executeCommand("ip", {"link", "set", "dev", interface, "up"});
++            }
++        }
+         return true;
+     }
+ 

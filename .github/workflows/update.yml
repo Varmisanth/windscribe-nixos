@@ -1,0 +1,98 @@
+name: update
+on:
+  schedule:
+    - cron: 0 6 * * *
+  workflow_dispatch:
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: experimental-features = nix-command flakes
+
+      - name: Check upstream
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          FILE: pkgs/app/params.nix
+        run: |
+          TAG=$(gh api repos/Windscribe/Desktop-App/releases/latest --jq .tag_name)
+          LATEST=${TAG#v}
+          if [ -z "$LATEST" ]; then
+            echo "Error: Could not fetch latest version" >&2
+            exit 1
+          fi
+          gh api "repos/$GITHUB_REPOSITORY/contents/$FILE" --jq .content | base64 -d > "$RUNNER_TEMP/params.nix"
+          CURRENT=$(nix eval --raw --file "$RUNNER_TEMP/params.nix" version)
+          BRANCH="update/windscribe-$LATEST"
+          echo "latest=$LATEST" >> $GITHUB_OUTPUT
+          echo "current=$CURRENT" >> $GITHUB_OUTPUT
+          echo "branch=$BRANCH" >> $GITHUB_OUTPUT
+          if [ "$LATEST" = "$CURRENT" ]; then
+            echo "needs=false" >> $GITHUB_OUTPUT
+          elif gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/$BRANCH" >/dev/null 2>&1; then
+            echo "needs=false" >> $GITHUB_OUTPUT
+          else
+            echo "needs=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Update version + hash
+        if: steps.check.outputs.needs == 'true'
+        env:
+          LATEST: ${{ steps.check.outputs.latest }}
+        run: |
+          HASH=$(nix flake prefetch "github:Windscribe/Desktop-App/v$LATEST" --json | jq -r '.hash // empty')
+          if [ -z "$HASH" ]; then
+            echo "Error: Could not fetch hash for version $LATEST" >&2
+            exit 1
+          fi
+          cat > "$RUNNER_TEMP/params.nix" <<EOF
+          {
+            hash = "$HASH";
+            version = "$LATEST";
+          }
+          EOF
+          nix eval --raw --file "$RUNNER_TEMP/params.nix" version >/dev/null
+
+      - name: Open PR
+        if: steps.check.outputs.needs == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BASE: ${{ github.event.repository.default_branch }}
+          BRANCH: ${{ steps.check.outputs.branch }}
+          CURRENT: ${{ steps.check.outputs.current }}
+          LATEST: ${{ steps.check.outputs.latest }}
+          FILE: pkgs/app/params.nix
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/git/refs" \
+            -f ref="refs/heads/$BRANCH" -f sha="$GITHUB_SHA" >/dev/null
+          gh api graphql \
+            -f repo="$GITHUB_REPOSITORY" \
+            -f branch="$BRANCH" \
+            -f oid="$GITHUB_SHA" \
+            -f headline="deps: bump Windscribe to v$LATEST" \
+            -f path="$FILE" \
+            -f contents="$(base64 -w0 "$RUNNER_TEMP/params.nix")" \
+            -f query='
+              mutation($repo: String!, $branch: String!, $oid: GitObjectID!, $headline: String!, $path: String!, $contents: Base64String!) {
+                createCommitOnBranch(input: {
+                  branch: { repositoryNameWithOwner: $repo, branchName: $branch },
+                  message: { headline: $headline },
+                  expectedHeadOid: $oid,
+                  fileChanges: { additions: [{ path: $path, contents: $contents }] }
+                }) { commit { oid } }
+              }' >/dev/null
+          gh pr create --base "$BASE" --head "$BRANCH" \
+            --title "deps: bump Windscribe to v$LATEST" \
+            --body "Auto-generated from upstream Windscribe Desktop-App.
+
+          **$CURRENT** → **$LATEST**
+
+          Release notes: https://github.com/Windscribe/Desktop-App/releases/tag/v$LATEST
+
+          Review release notes for vendored dependency version changes — may require manual updates to pkgs/."

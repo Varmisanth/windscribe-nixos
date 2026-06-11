@@ -1,0 +1,160 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index db7cd90..931bbde 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -5,6 +5,9 @@
+ 
+ cmake_minimum_required(VERSION 3.23)
+ 
++# windscribe-nixos: silence "unused variable" warnings for vars from nixpkgs cmake setup hook
++set(_nix_compat_vars "${BUILD_TESTING}${CMAKE_EXPORT_NO_PACKAGE_REGISTRY}")
++
+ set(CMAKE_POLICY_DEFAULT_CMP0077 NEW)  # option() honors normal variables
+ 
+ # Set macOS deployment target and architecture before project()
+@@ -213,20 +216,15 @@ endif()
+ # leaving VCPKG_ROOT unset. Defined only here so an unguarded use fails to compile rather than
+ # silently getting "".
+ if(BUILD_APP)
+-    ws_resolve_openvpn_version(WS_OPENVPN_VERSION)
++    if(NOT WS_OPENVPN_VERSION)
++        ws_resolve_openvpn_version(WS_OPENVPN_VERSION)
++    endif()
+     add_compile_definitions(WS_OPENVPN_VERSION="${WS_OPENVPN_VERSION}")
+ 
+     # Resolved here rather than next to ws_resolve_shared_libs() below, because the names are needed
+     # by the branding definitions that follow and by the subdirectories those definitions reach.
+     if(NOT WIN32)
+-        ws_resolve_openssl_libs()
+-        if(APPLE)
+-            # Not in the branding block below: the value is platform-specific, so a WS_MAC_ name must
+-            # not be defined anywhere it would hold something other than the macOS one.
+-            add_compile_definitions(WS_MAC_HELPER_FRAMEWORK_FILES="${WS_OPENSSL_SSL_LIB} ${WS_OPENSSL_CRYPTO_LIB}")
+-        else()
+-            list(APPEND WS_LINUX_RPATH_BINARIES "lib/${WS_OPENSSL_SSL_LIB}" "lib/${WS_OPENSSL_CRYPTO_LIB}")
+-        endif()
++        # windscribe-nixos: OpenSSL comes from nixpkgs, there is no vcpkg tree to copy or repath.
+     endif()
+ endif()
+ 
+diff --git a/cmake/integrations/windscribe.cmake b/cmake/integrations/windscribe.cmake
+index 9b9a7c3..36fadf6 100644
+--- a/cmake/integrations/windscribe.cmake
++++ b/cmake/integrations/windscribe.cmake
+@@ -97,21 +97,21 @@ elseif(UNIX)
+ endif()
+ 
+ set(WS_LINUX_APP_TARGETS
+-    ${WS_APP_TARGET} ${WS_CLI_TARGET} helper)
++    ${WS_APP_TARGET} helper)
+ 
+ # Additional subdirectories to build (beyond client and helper which are always built).
+ if(UNIX AND NOT APPLE)
+-    set(WS_ADDITIONAL_SUBDIRS src/windscribe-cli)
++    set(WS_ADDITIONAL_SUBDIRS)
+ endif()
+ 
+ # Binaries that need RPATH set to ${WS_LINUX_INSTALL_DIR}/lib.
+ # Paths are relative to ${WS_LINUX_INSTALL_DIR}.
+ set(WS_LINUX_RPATH_BINARIES
+     ${WS_APP_EXECUTABLE_NAME}
+-    ${WS_CLI_EXECUTABLE_NAME}
+     helper
+     ${WS_PRODUCT_NAME_LOWER}openvpn
+     lib/libwsnet.so
+ )
++set(WS_BUNDLED_HELPER_NAMES)
+ # The bundled OpenSSL libraries belong in this list too, but their names are only known once
+ # ws_resolve_openssl_libs() has run, so the root CMakeLists appends them.
+diff --git a/src/client/client-common/utils/log/logger.cpp b/src/client/client-common/utils/log/logger.cpp
+index 70fb6b0..cb77417 100644
+--- a/src/client/client-common/utils/log/logger.cpp
++++ b/src/client/client-common/utils/log/logger.cpp
+@@ -94,7 +94,7 @@ bool Logger::install(const QString &logFilePath, bool consoleOutput)
+         auto sinkDebug = std::make_shared<spdlog::sinks::msvc_sink_mt>(false);
+         spdlog::default_logger()->sinks().push_back(sinkDebug);
+         spdlog::get("raw")->sinks().push_back(sinkDebug);
+-#elif not defined(CLI_ONLY)
++#elif defined(WS_DEV_LOGS) && not defined(CLI_ONLY)
+         auto sinkDebug = std::make_shared<spdlog::sinks::stdout_sink_mt>();
+         sinkDebug->set_level(spdlog::level::trace); // Required to get any output in the terminal on Linux.
+         spdlog::default_logger()->sinks().push_back(sinkDebug);
+diff --git a/src/client/engine/engine/connectionmanager/connectionmanager.h b/src/client/engine/engine/connectionmanager/connectionmanager.h
+index 98e1c35..71ec2da 100644
+--- a/src/client/engine/engine/connectionmanager/connectionmanager.h
++++ b/src/client/engine/engine/connectionmanager/connectionmanager.h
+@@ -131,6 +131,7 @@ private:
+     friend class TestConnectionManager;
+ #endif
+ 
++public:
+     enum class State {
+         kDisconnected,
+         kConnecting, // an attempt is live (prepare or dial)
+@@ -142,6 +143,7 @@ private:
+     };
+     Q_ENUM(State)
+ 
++private:
+     // How Reconnecting was entered; meaningful only while state_ is Reconnecting. setState() is the
+     // only writer.
+     enum class ReconnectCause { Regular, Wake };
+diff --git a/src/client/frontend/gui/CMakeLists.txt b/src/client/frontend/gui/CMakeLists.txt
+index 63eddcd..f801ee4 100644
+--- a/src/client/frontend/gui/CMakeLists.txt
++++ b/src/client/frontend/gui/CMakeLists.txt
+@@ -40,8 +40,8 @@ set(WS_TS_FILES
+ 
+ # Using the -extensions flag to skip processing the .ui files in the test projects.  Otherwise, the
+ # strings in said ui files will be added to the .ts output files.
+-if (UPDATE_TRANSLATIONS)
+-    qt6_create_translation(WS_QM_FILES ${CMAKE_CURRENT_SOURCE_DIR}/../.. ${WS_TS_FILES} OPTIONS -extensions cpp,h -locations none)
++if (TRUE)
++    qt6_add_translation(WS_QM_FILES ${WS_TS_FILES})
+ endif()
+ 
+ set(PROJECT_SOURCES
+diff --git a/src/client/frontend/gui/main.cpp b/src/client/frontend/gui/main.cpp
+index b32ddf7..48fd730 100644
+--- a/src/client/frontend/gui/main.cpp
++++ b/src/client/frontend/gui/main.cpp
+@@ -159,7 +159,8 @@ int main(int argc, char *argv[])
+ #elif defined (Q_OS_MACOS)
+         QStringList pluginsPath;
+         pluginsPath << MacUtils::getBundlePath() + "/Contents/PlugIns";
+-        QCoreApplication::setLibraryPaths(pluginsPath);
++        for (const QString &p : pluginsPath)
++            QCoreApplication::addLibraryPath(p);
+ #elif defined (Q_OS_LINUX)
+         //todo move to LinuxUtils
+         char result[PATH_MAX] = {};
+@@ -170,7 +171,8 @@ int main(int argc, char *argv[])
+         }
+         QStringList pluginsPath;
+         pluginsPath << QString::fromStdString(path) + "/plugins";
+-        QCoreApplication::setLibraryPaths(pluginsPath);
++        for (const QString &p : pluginsPath)
++            QCoreApplication::addLibraryPath(p);
+     #endif
+ #endif
+ 
+diff --git a/src/client/CMakeLists.txt b/src/client/CMakeLists.txt
+index cada3aa..5fb80af 100644
+--- a/src/client/CMakeLists.txt
++++ b/src/client/CMakeLists.txt
+@@ -243,8 +243,6 @@ if (APPLE)
+         LIBRARY DESTINATION "${WS_PRODUCT_NAME}.app/Contents/Frameworks"
+         BUNDLE DESTINATION .
+     )
+-    install(FILES ${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/lib/${WS_OPENSSL_CRYPTO_LIB} DESTINATION "${WS_PRODUCT_NAME}.app/Contents/Frameworks")
+-    install(FILES ${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/lib/${WS_OPENSSL_SSL_LIB} DESTINATION "${WS_PRODUCT_NAME}.app/Contents/Frameworks")
+ else()
+     install(TARGETS ${WS_APP_TARGET}
+         RUNTIME DESTINATION .
+@@ -268,6 +266,4 @@ endif()
+ 
+ if(UNIX AND (NOT APPLE))
+     install(IMPORTED_RUNTIME_ARTIFACTS wsnet DESTINATION lib)
+-    install(FILES ${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/lib/${WS_OPENSSL_CRYPTO_LIB} DESTINATION lib)
+-    install(FILES ${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/lib/${WS_OPENSSL_SSL_LIB} DESTINATION lib)
+ endif()
