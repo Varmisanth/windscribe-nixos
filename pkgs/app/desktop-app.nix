@@ -71,12 +71,12 @@ let
 in
 stdenv.mkDerivation (finalAttrs: {
   pname = "windscribe";
-  version = "2.23.12";
+  version = "2.24.12";
   src = fetchFromGitHub {
     owner = "Windscribe";
     repo = "Desktop-App";
     rev = "v${finalAttrs.version}";
-    hash = "sha256-/2Gp/yUuSjB4N7pBeuTPNQFfcJ7tiuL0toDkspr5qUE=";
+    hash = "sha256-RiSpysVSrzhWtTgkQmspQ/Hj2cFQLIyjEtfoT7YhM1Q=";
   };
   patches = [
     ./build.patch
