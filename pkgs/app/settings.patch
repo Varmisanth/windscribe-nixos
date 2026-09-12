@@ -2,13 +2,13 @@ diff --git a/src/client/client-common/types/enginesettings.cpp b/src/client/clie
 index a6c93fe..9fa0286 100644
 --- a/src/client/client-common/types/enginesettings.cpp
 +++ b/src/client/client-common/types/enginesettings.cpp
-@@ -1,5 +1,7 @@
+@@ -1,4 +1,6 @@
  #include "enginesettings.h"
  
 +#include <QDir>
 +#include <QFile>
+ #include <QFileInfo>
  #include <QJsonDocument>
- #include <filesystem>
  
 @@ -139,6 +141,44 @@ bool EngineSettings::loadFromSettings()
      fromIni(ini);
