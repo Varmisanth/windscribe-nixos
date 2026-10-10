@@ -28,12 +28,12 @@
   nftables,
   nlohmann_json,
   pkg-config,
+  procps,
   qt6,
   range-v3,
   rapidjson,
   skyrUrl,
   spdlog,
-  systemd,
   tl-expected,
   util-linux,
   writeText,
@@ -57,17 +57,24 @@ let
     macro(install_vcpkg_dependencies)
     endmacro()
   '';
-  scriptPath = lib.makeBinPath [
-    coreutils
-    gawk
-    gnugrep
-    gnused
-    iproute2
-    iptables
-    kmod
-    windscribeNmcli
-    systemd
-    util-linux
+  systemProfile = "/run/current-system/sw/bin";
+  helperPath = lib.concatStringsSep ":" [
+    (lib.makeBinPath [
+      coreutils
+      ethtool
+      gawk
+      gnugrep
+      gnused
+      iproute2
+      iptables
+      iw
+      kmod
+      nftables
+      windscribeNmcli
+      procps
+      util-linux
+    ])
+    systemProfile
   ];
   Params = import ./params.nix;
 in
@@ -143,6 +150,8 @@ stdenv.mkDerivation (finalAttrs: {
     qt_import_plugins(''${WS_APP_TARGET} INCLUDE Qt6::QWaylandIntegrationPlugin'
     substituteInPlace src/helper/linux/CMakeLists.txt \
       --replace-fail 'OpenSSL::Crypto' 'OpenSSL::Crypto OpenSSL::SSL'
+    substituteInPlace src/helper/linux/main.cpp \
+      --replace-fail '"/usr/sbin:/usr/bin:/sbin:/bin"' '"${helperPath}"'
   '';
   cmakeFlags = [
     "-DBUILD_DEB=OFF"
@@ -170,7 +179,7 @@ stdenv.mkDerivation (finalAttrs: {
     cp -r $NIX_BUILD_TOP/source/src/installer/windscribe/linux/opt/windscribe/scripts $out/opt/windscribe/
     for s in $out/opt/windscribe/scripts/*; do
       chmod +x "$s"
-      wrapProgram "$s" --prefix PATH : ${scriptPath}
+      wrapProgram "$s" --prefix PATH : ${helperPath}
     done
     ln -s ../opt/windscribe/Windscribe $out/bin/Windscribe
     ln -s ${windscribeQtPlugins} $out/opt/windscribe/plugins
@@ -198,7 +207,6 @@ stdenv.mkDerivation (finalAttrs: {
     }"
     "--set-default QT_QPA_PLATFORMTHEME qt6ct"
   ];
-  passthru.nmcli = windscribeNmcli;
   meta = {
     description = "Windscribe VPN desktop client";
     homepage = "https://github.com/Windscribe/Desktop-App";

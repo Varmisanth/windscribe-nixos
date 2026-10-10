@@ -171,18 +171,6 @@ in
         systemd.services.windscribe-helper = {
           before = [ "network-pre.target" ];
           description = "Windscribe VPN helper daemon";
-          path = with pkgs; [
-            coreutils
-            ethtool
-            gawk
-            iproute2
-            iptables
-            iw
-            kmod
-            procps
-            util-linux
-            windscribe.nmcli
-          ];
           serviceConfig = {
             ExecStart = "${windscribe}/opt/windscribe/helper";
             Restart = "always";
