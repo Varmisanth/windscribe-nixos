@@ -22,6 +22,43 @@ let
     fi
   '';
   declarativeSettings = settingsLib.toJsonFile (cfg.settings // { inherit launchOnStartup; });
+  resolvedEnable = [
+    "services"
+    "resolved"
+    "enable"
+  ];
+  dnsBackends = {
+    networkmanager = [
+      [
+        "networking"
+        "networkmanager"
+        "enable"
+      ]
+    ];
+    resolvconf = [
+      [
+        "networking"
+        "resolvconf"
+        "enable"
+      ]
+      resolvedEnable
+    ];
+    systemd-resolved = [ resolvedEnable ];
+  };
+  dnsAssertion =
+    scope: settings:
+    let
+      manager = settings.dnsManager or null;
+      backends = dnsBackends.${manager};
+      required = lib.concatMapStringsSep " and " lib.showOption backends;
+      single = lib.length backends == 1;
+      verb = if single then "is" else "are";
+      target = if single then "it" else "one";
+    in
+    lib.optional (manager != null && dnsBackends ? ${manager}) {
+      assertion = lib.any (option: lib.getAttrFromPath option config) backends;
+      message = ''programs.windscribe.settings.dnsManager is "${manager}" ${scope}, but ${required} ${verb} false. The helper would fail to set the tunnel DNS. Enable ${target}, or set dnsManager to "auto".'';
+    };
   windscribeDesktop = pkgs.makeDesktopItem {
     categories = [ "Network" ];
     desktopName = "Windscribe";
@@ -124,6 +161,7 @@ in
       {
         assertions =
           settingsLib.mkAssertions cfg.settings
+          ++ dnsAssertion "in nixosModules" cfg.settings
           ++ lib.optionals (options ? home-manager) (
             lib.concatMap (
               user:
@@ -135,6 +173,7 @@ in
                 assertion = false;
                 message = ''programs.windscribe.settings is set in both nixosModules and homeManagerModules for user "${user}". Pick one location — the App reads the user file instead of the system one rather than merging the two, so the NixOS-level settings would be dropped entirely for this user.'';
               }
+              ++ dnsAssertion ''for user "${user}" in homeManagerModules'' hmSettings
               ++ lib.optional (cfg.preferencesFile != null && (hmCfg.preferencesFile or null) != null) {
                 assertion = false;
                 message = ''programs.windscribe.preferencesFile is set in both nixosModules and homeManagerModules for user "${user}". Pick one location — the App reads the user file instead of the system one rather than merging the two, so the NixOS-level export would be dropped entirely for this user.'';
